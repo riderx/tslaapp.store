@@ -1,0 +1,20 @@
+{
+  "name": "worker-tslaapp",
+  "assets": {
+    "directory": "./dist"
+  },
+  "compatibility_date": "2025-04-01",
+  "route": {
+    "pattern": "tslap.store",
+    "custom_domain": true
+  },
+  "compatibility_flags": [
+    "nodejs_compat_v2"
+  ],
+  "workers_dev": false,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "upload_source_maps": true
+} 
