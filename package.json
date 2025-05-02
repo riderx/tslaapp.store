@@ -16,8 +16,11 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.4",
+    "@types/glob": "^8.1.0",
+    "@types/node": "^22.15.3",
     "@vitejs/plugin-vue": "^4.5.0",
     "autoprefixer": "^10.4.21",
+    "glob": "^11.0.2",
     "postcss": "^8.5.3",
     "tailwindcss": "^4.1.4",
     "typescript": "^5.2.2",
