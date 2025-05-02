@@ -124,7 +124,6 @@ export const useSpeedStore = defineStore('speed', () => {
     
     resetTest()
     isRunning.value = true
-    startTime.value = Date.now()
     speedLog.value = []
     
     watchId.value = navigator.geolocation.watchPosition(
@@ -161,6 +160,15 @@ export const useSpeedStore = defineStore('speed', () => {
     // Round to 1 decimal
     speed = Math.round(speed * 10) / 10
     currentSpeed.value = speed
+    
+    // Start timer only when actual movement is detected
+    const SPEED_THRESHOLD = 1 // mph or km/h
+    if (startTime.value === 0 && speed > SPEED_THRESHOLD) {
+      startTime.value = Date.now()
+    }
+    
+    // Only proceed with calculations if the timer has started
+    if (startTime.value === 0) return
     
     // Update max speed
     if (speed > maxSpeed.value) {
