@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Home from './views/Home.vue'
 import SpeedTest from './views/SpeedTest.vue'
+import CarSound from './views/CarSound.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -12,6 +13,10 @@ export default createRouter({
     {
       path: '/speed-test',
       component: SpeedTest
+    },
+    {
+      path: '/car-sound',
+      component: CarSound
     },
   ]
 })

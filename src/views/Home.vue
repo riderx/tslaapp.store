@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Activity, Gauge, Users, Zap } from 'lucide-vue-next'
+import { Activity, Gauge, Users, Zap, Volume2 } from 'lucide-vue-next'
 
 const router = useRouter()
 
@@ -12,6 +12,13 @@ const apps = [
     icon: Gauge,
     available: true,
     route: '/speed-test'
+  },
+  {
+    id: "carsound",
+    name: "Car Sound",
+    icon: Volume2,
+    available: true,
+    route: '/car-sound'
   },
   {
     id: "stats",
