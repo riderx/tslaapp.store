@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { Pause, Play, Volume2, Settings } from 'lucide-vue-next'
+import { Pause, Play, Volume2, Settings, X, ZapIcon } from 'lucide-vue-next'
+import { SoundGeneratorAudioListener, EngineSoundGenerator } from '/src/engine/engine_sound_generator/sound_generator_worklet_wasm.js'
+import * as THREE from '/src/engine/three_js/build/three.module.js'
 
 // Engine sound generator state
 const audioContext = ref<AudioContext | null>(null)
@@ -23,90 +25,127 @@ const sensitivity = ref(50)
 const useGps = ref(true)
 const useAccelerometer = ref(true)
 
-// Load engine sound generator script
-const loadScript = () => {
-  return new Promise<void>((resolve) => {
-    const script = document.createElement('script')
-    script.src = 'https://antonio-r1.github.io/engine-sound-generator/src/engine_sound_generator/sound_generator_worklet_wasm.js'
-    script.type = 'module'
-    script.onload = () => resolve()
-    document.head.appendChild(script)
-  })
+// Test acceleration
+const isAccelerating = ref(false)
+const testAccelerationValue = ref(50)
+
+// Toggle play/pause
+const togglePlay = async () => {
+  try {
+    // First create or resume AudioContext if needed
+    if (!audioContext.value) {
+      // Create AudioContext (must happen in response to user action)
+      audioContext.value = new AudioContext()
+    }
+    
+    if (audioContext.value.state === 'suspended') {
+      await audioContext.value.resume()
+    }
+    
+    // Then initialize sound generator if needed
+    if (!soundGenerator.value) {
+      await initSoundGenerator()
+    }
+    
+    // If we still don't have a sound generator, abort
+    if (!soundGenerator.value) {
+      console.error('Failed to initialize sound generator')
+      return
+    }
+    
+    // Toggle play state
+    if (isPlaying.value) {
+      soundGenerator.value.stop()
+    } else {
+      soundGenerator.value.play()
+      startSensors()
+    }
+    
+    isPlaying.value = !isPlaying.value
+  } catch (error) {
+    console.error('Error toggling sound generator:', error)
+  }
 }
 
 // Initialize sound generator
 const initSoundGenerator = async () => {
   try {
-    await loadScript()
-    
-    // Access the imported modules
-    const { SoundGeneratorAudioListener, EngineSoundGenerator } = (window as any).engineSoundGeneratorModule || {}
-    
-    if (!SoundGeneratorAudioListener || !EngineSoundGenerator) {
-      console.error('Engine sound generator modules not found')
+    // Make sure we have an AudioContext created first
+    if (!audioContext.value) {
+      console.error('AudioContext must be created before initializing sound generator')
       return
     }
-
-    audioContext.value = new AudioContext()
+    
+    console.log('Initializing sound generator with AudioContext', audioContext.value)
+    
+    // Create listener
     const listener = new SoundGeneratorAudioListener()
     
-    // Load sound generator
+    // Load sound generator using loadingManager
     await new Promise<void>((resolve) => {
-      const loadingManager = {
-        onLoad: () => resolve()
+      const loadingManager = new THREE.LoadingManager()
+      loadingManager.onLoad = () => {
+        console.log('Sound generator modules loaded')
+        resolve()
       }
-      EngineSoundGenerator.load(loadingManager, listener)
+      
+      // Pass the path to the sound_generator_wasm directory
+      EngineSoundGenerator.load(loadingManager, listener, '/src/engine/engine_sound_generator')
     })
     
     // Create engine sound generator
     soundGenerator.value = new EngineSoundGenerator({
       listener,
       parameters: {
-        cylinders: 8,
-        intakeWaveguideLength: 100,
-        exhaustWaveguideLength: 100,
-        extractorWaveguideLength: 100,
-        intakeOpenReflectionFactor: 0.01,
-        intakeClosedReflectionFactor: 0.95,
-        exhaustOpenReflectionFactor: 0.01,
-        exhaustClosedReflectionFactor: 0.95,
-        ignitionTime: 0.016,
-        straightPipeWaveguideLength: 128,
-        straightPipeReflectionFactor: 0.01,
-        mufflerElementsLength: [10, 15, 20, 25],
-        action: 0.1,
-        outletWaveguideLength: 5,
-        outletReflectionFactor: 0.01
+        // cylinders: 8,
+        // intakeWaveguideLength: 100,
+        // exhaustWaveguideLength: 100,
+        // extractorWaveguideLength: 100,
+        // intakeOpenReflectionFactor: 0.01,
+        // intakeClosedReflectionFactor: 0.95,
+        // exhaustOpenReflectionFactor: 0.01,
+        // exhaustClosedReflectionFactor: 0.95,
+        // ignitionTime: 0.016,
+        // straightPipeWaveguideLength: 128,
+        // straightPipeReflectionFactor: 0.01,
+        // mufflerElementsLength: [10, 15, 20, 25],
+        // action: 0.1,
+        // outletWaveguideLength: 5,
+        // outletReflectionFactor: 0.01
+        cylinders: 4,
+
+                                    intakeWaveguideLength: 100,
+                                    exhaustWaveguideLength: 100,
+                                    extractorWaveguideLength: 100,
+
+                                    intakeOpenReflectionFactor: 0.01,
+                                    intakeClosedReflectionFactor: 0.95,
+
+                                    exhaustOpenReflectionFactor: 0.01,
+                                    exhaustClosedReflectionFactor: 0.95,
+                                    ignitionTime: 0.016,
+
+                                    straightPipeWaveguideLength: 128,
+                                    straightPipeReflectionFactor: 0.01,
+
+                                    mufflerElementsLength: [10, 15, 20, 25],
+                                    action: 0.1,
+
+                                    outletWaveguideLength: 5,
+                                    outletReflectionFactor: 0.01
       }
     })
     
     // Set volume
     updateVolume()
     
-    console.log('Sound generator initialized')
+    // Update RPM
+    updateRPM()
+    
+    console.log('Sound generator initialized successfully')
   } catch (error) {
     console.error('Failed to initialize sound generator:', error)
   }
-}
-
-// Toggle play/pause
-const togglePlay = async () => {
-  if (!audioContext.value || !soundGenerator.value) {
-    await initSoundGenerator()
-  }
-  
-  if (audioContext.value?.state === 'suspended') {
-    await audioContext.value.resume()
-  }
-  
-  if (isPlaying.value) {
-    soundGenerator.value?.stop()
-  } else {
-    soundGenerator.value?.play()
-    startSensors()
-  }
-  
-  isPlaying.value = !isPlaying.value
 }
 
 // Update RPM based on sensor data
@@ -131,6 +170,13 @@ const updateRPM = () => {
     newRpm += accelFactor * accelInfluence
   }
   
+  // Apply test acceleration if active
+  if (isAccelerating.value) {
+    const testAccelFactor = testAccelerationValue.value / 100
+    const testAccelInfluence = (maxRpm.value - minRpm.value) * 0.7
+    newRpm += testAccelFactor * testAccelInfluence
+  }
+  
   // Clamp RPM to valid range
   rpm.value = Math.max(minRpm.value, Math.min(newRpm, maxRpm.value))
   
@@ -138,6 +184,31 @@ const updateRPM = () => {
   if (soundGenerator.value?.worklet?.parameters) {
     const rpmParam = soundGenerator.value.worklet.parameters.get('rpm')
     if (rpmParam) rpmParam.value = rpm.value
+  }
+}
+
+// Toggle test acceleration
+const toggleTestAcceleration = () => {
+  isAccelerating.value = !isAccelerating.value
+  if (isAccelerating.value) {
+    // Start acceleration test
+    updateRPM()
+    // Schedule automatic stop after 3 seconds
+    setTimeout(() => {
+      isAccelerating.value = false
+      updateRPM()
+    }, 3000)
+  } else {
+    // Stop acceleration test immediately
+    updateRPM()
+  }
+}
+
+// Update test acceleration value
+const handleTestAccelerationChange = (e: Event) => {
+  testAccelerationValue.value = parseInt((e.target as HTMLInputElement).value)
+  if (isAccelerating.value) {
+    updateRPM()
   }
 }
 
@@ -329,7 +400,7 @@ const toggleSettings = () => {
       </div>
       
       <div class="car-animation">
-        <div class="car-icon" :class="{ 'car-accelerating': rpm > minRpm + 500 }">
+        <div class="car-icon" :class="{ 'car-accelerating': rpm > minRpm + 500 || isAccelerating }">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512" fill="currentColor">
             <path d="M171.3 96H224v96H111.3l30.4-75.9C146.5 104 158.2 96 171.3 96zM272 192V96h81.2c9.7 0 18.9 4.4 25 12l67.2 84H272zm256.2 1L428.2 68c-18.2-22.8-45.8-36-75-36H171.3c-39.3 0-74.6 23.9-89.1 60.3L40.6 196.4C16.8 205.8 0 228.9 0 256V368c0 17.7 14.3 32 32 32H65.3c7.6 45.4 47.1 80 94.7 80s87.1-34.6 94.7-80H385.3c7.6 45.4 47.1 80 94.7 80s87.1-34.6 94.7-80H608c17.7 0 32-14.3 32-32V320c0-65.2-48.8-119-111.8-127zM434.7 368a48 48 0 1 1 90.5 32 48 48 0 1 1 -90.5-32zM160 336a48 48 0 1 1 0 96 48 48 0 1 1 0-96z"/>
           </svg>
@@ -357,7 +428,12 @@ const toggleSettings = () => {
     </div>
     
     <div class="settings-panel" v-if="showSettings">
-      <h2 class="settings-title">Settings</h2>
+      <div class="settings-header">
+        <h2 class="settings-title">Settings</h2>
+        <button class="close-button" @click="toggleSettings">
+          <X />
+        </button>
+      </div>
       
       <div class="settings-group">
         <label class="settings-label">
@@ -406,6 +482,31 @@ const toggleSettings = () => {
           <input type="checkbox" v-model="useAccelerometer" />
           <span>Use accelerometer</span>
         </label>
+      </div>
+      
+      <div class="settings-group">
+        <h3 class="settings-subtitle">Test Acceleration</h3>
+        <label class="settings-label">
+          <span>Acceleration Power: {{ testAccelerationValue }}%</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            v-model.number="testAccelerationValue"
+            @input="handleTestAccelerationChange"
+            class="settings-slider"
+          />
+        </label>
+        <button 
+          class="test-button" 
+          @click="toggleTestAcceleration"
+          :class="{ 'test-active': isAccelerating }"
+          :disabled="!isPlaying"
+        >
+          <ZapIcon class="test-icon" />
+          <span>{{ isAccelerating ? 'ACCELERATING...' : 'TEST ACCELERATION' }}</span>
+        </button>
+        <p class="test-info" v-if="!isPlaying">Start the engine to test acceleration</p>
       </div>
       
       <div class="permissions-info">
@@ -623,6 +724,32 @@ const toggleSettings = () => {
   animation: slide-in 0.3s ease;
 }
 
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+}
+
+.close-button {
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.close-button:hover {
+  color: white;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
 @keyframes slide-in {
   from { transform: translateX(100%); }
   to { transform: translateX(0); }
@@ -631,8 +758,14 @@ const toggleSettings = () => {
 .settings-title {
   font-size: 1.5rem;
   font-weight: 600;
-  margin-bottom: 2rem;
   letter-spacing: 0.05em;
+}
+
+.settings-subtitle {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .settings-group {
@@ -706,6 +839,58 @@ const toggleSettings = () => {
 
 .settings-toggle input:checked::before {
   transform: translateX(1.25rem);
+}
+
+.test-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.75rem;
+  background-color: #3498db;
+  color: white;
+  border: none;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.test-button:hover:not(:disabled) {
+  background-color: #2980b9;
+}
+
+.test-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.test-active {
+  background-color: #e74c3c;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.8; }
+  100% { opacity: 1; }
+}
+
+.test-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.test-info {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+  margin-top: 0.5rem;
 }
 
 .permissions-info {
