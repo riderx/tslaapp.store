@@ -1,4 +1,5 @@
 import { clamp } from "./util/clamp";
+import { AudioContext } from 'standardized-audio-context';
 
 export class DynamicAudioNode {
     constructor(

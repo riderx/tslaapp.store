@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { AudioContext } from 'standardized-audio-context';
+import { ref, onUnmounted, computed } from 'vue'
 import { Pause, Play, Volume2, Settings, X, ZapIcon } from 'lucide-vue-next'
 import { SoundGeneratorAudioListener, EngineSoundGenerator } from '/src/engine/engine_sound_generator/sound_generator_worklet_wasm.js'
 import * as THREE from '/src/engine/three_js/build/three.module.js'
