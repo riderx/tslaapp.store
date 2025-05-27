@@ -21,6 +21,13 @@ const apps = [
     route: '/car-sound'
   },
   {
+    id: "carsoundv2",
+    name: "Car Sound V2",
+    icon: Volume2,
+    available: true,
+    route: '/car-sound-v2'
+  },
+  {
     id: "stats",
     name: "Stats",
     icon: Activity,
