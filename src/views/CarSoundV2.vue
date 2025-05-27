@@ -38,8 +38,6 @@ const testAccelerationValue = ref(50)
 let animationId: number | null = null
 let lastTime = 0
 
-// Available configurations
-const configOptions = Object.keys(configurations) as (keyof typeof configurations)[]
 
 // Toggle play/pause
 const togglePlay = async () => {
