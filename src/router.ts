@@ -4,7 +4,6 @@ import SpeedTest from './views/SpeedTest.vue'
 import CarSound from './views/CarSound.vue'
 import CarSoundV2 from './views/CarSoundV2.vue'
 import Results from './views/Results.vue'
-import Nav from './views/Nav.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -31,7 +30,7 @@ export default createRouter({
     },
     {
       path: '/nav',
-      component: Nav
+      component: () => import('./views/Nav.vue')
     }
   ]
 })

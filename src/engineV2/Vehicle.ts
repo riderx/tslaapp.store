@@ -2,6 +2,7 @@ import { AudioManager } from "./AudioManager";
 import { Engine } from "./Engine";
 import { Drivetrain } from "./Drivetrain";
 import { EngineConfiguration } from "./configurations";
+import { SHIFT_MODES, type ShiftMode } from "./shiftModes";
 
 export class Vehicle {
 
@@ -11,6 +12,11 @@ export class Vehicle {
     drivetrain = new Drivetrain();
     
     mass = 500;
+
+    autoShiftEnabled = false;
+    shiftMode: ShiftMode = 'average';
+    private lastAutoShiftAt = 0;
+    private gearHoldStartedAt = 0;
 
     velocity = 0;
     wheel_rpm = 0;
@@ -39,7 +45,7 @@ export class Vehicle {
         const h = dt / subSteps;
 
         /* Light virtual load for parked sound-sim */
-        const I = this.getLoadInertia() * 0.08;
+        const I = this.getLoadInertia() * 0.02;
 
         for (let i = 0; i < subSteps; i++) {
             
@@ -62,6 +68,8 @@ export class Vehicle {
         //     console.log(this.velocity);
         // }
 
+        this.tickAutoShift(time);
+
         if (this.audio.ctx)
             this.engine.applySounds(this.audio.samples, this.drivetrain.getGearRatio());
     }
@@ -69,21 +77,74 @@ export class Vehicle {
     getLoadInertia() {
         if (this.drivetrain.gear == 0)
             return 0;
-            
+
         const gearRatio = this.drivetrain.getGearRatio();
         const totalGearRatio = this.drivetrain.getTotalGearRatio();
 
-        /* Moment of inertia - I = mr^2 */
         const I_veh = this.mass * Math.pow(this.wheel_radius, 2);
         const I_wheels = 4 * 12.0 * Math.pow(this.wheel_radius, 2);
 
-        /* Adjust inertia for gear ratio */
-        const I1 = I_veh / Math.pow(totalGearRatio, 2); 
-        const I2 = I_wheels / Math.pow(totalGearRatio, 2); 
-        const I3 = this.drivetrain.inertia / Math.pow(gearRatio, 2); 
-        const I = I1 + I2 + I3;
+        const I1 = I_veh / Math.pow(totalGearRatio, 2);
+        const I2 = I_wheels / Math.pow(totalGearRatio, 2);
+        const I3 = this.drivetrain.inertia / Math.pow(gearRatio, 2);
 
-        return I;
+        return I1 + I2 + I3;
+    }
+
+    setShiftMode(mode: ShiftMode) {
+        this.shiftMode = mode;
+    }
+
+    private tickAutoShift(time: number) {
+        if (!this.autoShiftEnabled || this.drivetrain.isShifting)
+            return;
+
+        const mode = SHIFT_MODES[this.shiftMode];
+        if (time - this.lastAutoShiftAt < mode.intervalMs)
+            return;
+
+        const limiter = Math.max(this.engine.limiter, 1);
+        const upRpm = limiter * mode.upshift;
+        const downRpm = limiter * mode.downshift;
+        const rpm = this.engine.rpm;
+        const throttle = this.engine.throttle;
+        const gear = this.drivetrain.gear;
+        const maxGear = this.drivetrain.gears.length;
+
+        /* Pull away from neutral when throttle applied */
+        if (gear === 0 && throttle > 0.12) {
+            this.nextGear();
+            this.lastAutoShiftAt = time;
+            this.gearHoldStartedAt = time;
+            return;
+        }
+
+        if (gear <= 0) {
+            this.gearHoldStartedAt = time;
+            return;
+        }
+
+        if (this.gearHoldStartedAt <= 0)
+            this.gearHoldStartedAt = time;
+
+        const held = time - this.gearHoldStartedAt;
+        const shouldUpshift =
+            gear < maxGear &&
+            throttle > 0.18 &&
+            (rpm >= upRpm || (throttle > 0.55 && held >= mode.maxHoldMs));
+
+        if (shouldUpshift) {
+            this.nextGear();
+            this.lastAutoShiftAt = time;
+            this.gearHoldStartedAt = time;
+            return;
+        }
+
+        if (gear > 1 && throttle < 0.4 && rpm <= downRpm) {
+            this.prevGear();
+            this.lastAutoShiftAt = time;
+            this.gearHoldStartedAt = time;
+        }
     }
 
 

@@ -28,6 +28,10 @@ export class Drivetrain {
 
     private shiftTimer: ReturnType<typeof setTimeout> | null = null;
 
+    get isShifting() {
+        return this.shiftTimer !== null;
+    }
+
     constructor() {
         this.init();
     }

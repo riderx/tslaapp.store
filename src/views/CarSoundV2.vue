@@ -4,6 +4,7 @@ import { Pause, Play, Volume2, Settings, X, ZapIcon } from 'lucide-vue-next'
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
+import { SHIFT_MODE_LIST, type ShiftMode } from '../engineV2/shiftModes'
 
 // Vehicle and engine state
 const vehicle = shallowRef<Vehicle | null>(null)
@@ -32,6 +33,8 @@ const sensitivity = ref(50)
 const useGps = ref(false)
 const useAccelerometer = ref(false)
 const selectedConfig = ref<keyof typeof configurations>('bac_mono')
+const autoShiftEnabled = ref(true)
+const shiftMode = ref<ShiftMode>('average')
 
 // Test acceleration
 const isAccelerating = ref(false)
@@ -91,6 +94,7 @@ const initVehicle = async () => {
     
     // Set initial volume
     updateVolume()
+    syncAutoShift()
     
     console.log('Vehicle initialized successfully')
   } catch (error) {
@@ -107,6 +111,7 @@ const startEngine = () => {
   // Resume audio after user gesture
   void vehicle.value.audio.ctx?.resume()
   updateVolume()
+  syncAutoShift()
   
   startSensors()
   window.addEventListener('keydown', handleKeyDown)
@@ -156,7 +161,9 @@ const startUpdateLoop = () => {
       // Update display values
       rpm.value = vehicle.value.engine.rpm
       throttle.value = vehicle.value.engine.throttle
-      gear.value = vehicle.value.drivetrain.gear
+      if (!vehicle.value.drivetrain.isShifting) {
+        gear.value = vehicle.value.drivetrain.gear
+      }
     }
     
     animationId = requestAnimationFrame(update)
@@ -281,6 +288,22 @@ const shiftDown = () => {
   if (vehicle.value && isPlaying.value) {
     vehicle.value.prevGear()
   }
+}
+
+const syncAutoShift = () => {
+  if (!vehicle.value) return
+  vehicle.value.autoShiftEnabled = autoShiftEnabled.value
+  vehicle.value.setShiftMode(shiftMode.value)
+}
+
+const handleAutoShiftToggle = () => {
+  autoShiftEnabled.value = !autoShiftEnabled.value
+  syncAutoShift()
+}
+
+const selectShiftMode = (mode: ShiftMode) => {
+  shiftMode.value = mode
+  syncAutoShift()
 }
 
 // Start sensor monitoring
@@ -505,12 +528,37 @@ const toggleSettings = () => {
         </div>
         
         <div class="gear-controls" v-if="isPlaying">
-          <button class="gear-button" @click="shiftDown" :disabled="gear <= 0">
+          <button class="gear-button" @click="shiftDown" :disabled="gear <= 0 || autoShiftEnabled">
             ↓ Shift Down
           </button>
-          <button class="gear-button" @click="shiftUp" :disabled="gear >= 6">
+          <button class="gear-button" @click="shiftUp" :disabled="gear >= 6 || autoShiftEnabled">
             ↑ Shift Up
           </button>
+        </div>
+
+        <div class="auto-shift" v-if="isPlaying">
+          <button
+            class="auto-toggle"
+            :class="{ active: autoShiftEnabled }"
+            @click="handleAutoShiftToggle"
+          >
+            Auto Shift {{ autoShiftEnabled ? 'On' : 'Off' }}
+          </button>
+          <div class="shift-modes" :class="{ disabled: !autoShiftEnabled }">
+            <button
+              v-for="mode in SHIFT_MODE_LIST"
+              :key="mode.id"
+              class="mode-button"
+              :class="{ active: shiftMode === mode.id }"
+              :disabled="!autoShiftEnabled"
+              @click="selectShiftMode(mode.id)"
+            >
+              {{ mode.label }}
+            </button>
+          </div>
+          <p class="mode-hint">
+            {{ shiftMode === 'chill' ? 'Early, smooth shifts' : shiftMode === 'assertive' ? 'Holds gears near redline' : 'Balanced shift points' }}
+          </p>
         </div>
       </div>
     </div>
@@ -879,6 +927,69 @@ const toggleSettings = () => {
 .play-icon {
   width: 1.5rem;
   height: 1.5rem;
+}
+
+
+.auto-shift {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.auto-toggle {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auto-toggle.active {
+  background-color: rgba(232, 33, 39, 0.25);
+  border-color: #e82127;
+}
+
+.shift-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+
+.shift-modes.disabled {
+  opacity: 0.45;
+}
+
+.mode-button {
+  padding: 0.65rem 0.25rem;
+  background-color: rgba(255, 255, 255, 0.06);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.mode-button.active {
+  background-color: rgba(232, 33, 39, 0.35);
+  border-color: #e82127;
+}
+
+.mode-button:disabled {
+  cursor: not-allowed;
+}
+
+.mode-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
 }
 
 .gear-controls {
