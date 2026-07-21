@@ -1,5 +1,4 @@
 import { clamp } from "./util/clamp";
-import { AudioContext } from 'standardized-audio-context';
 
 export class DynamicAudioNode {
     constructor(
@@ -10,16 +9,16 @@ export class DynamicAudioNode {
     ) {}
 }
 
-export class AudioSource {
-    public source: string;
-    public rpm: number = 1000;
-    public volume?: number = 1.0;
+export type AudioSource = {
+    source: string;
+    rpm: number;
+    volume?: number;
 }
 
 export class AudioManager {
 
-    ctx: AudioContext;
-    volume: GainNode;
+    ctx: AudioContext | null = null;
+    volume: GainNode | null = null;
 
     samples: Record<string, DynamicAudioNode> = {}
 
@@ -28,25 +27,35 @@ export class AudioManager {
             return;
 
         this.ctx = new AudioContext();
-        this.volume = new GainNode(this.ctx);
-        // this.volume.gain.value = 0.2;
+        this.volume = this.ctx.createGain();
+        this.volume.gain.value = 0.5;
 
         for (const key in sources) {
             this.samples[key] = await this.add(sources[key]);
         }
         
         if (this.ctx.state === 'suspended')
-            this.ctx.resume();
+            await this.ctx.resume();
     }
 
     async add(source: AudioSource): Promise<DynamicAudioNode> {
+        if (!this.ctx || !this.volume) {
+            throw new Error('AudioManager not initialized');
+        }
+
         const audio = this.ctx.createBufferSource();
-        const arrayBuffer = await fetch(source.source).then((res) => res.arrayBuffer());
-        const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+        const url = source.source.split('/').map(encodeURIComponent).join('/');
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to load audio: ${source.source} (${response.status})`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer.slice(0));
         audio.buffer = audioBuffer;
         audio.loop = true;
 
-        const gain = new GainNode(this.ctx);
+        const gain = this.ctx.createGain();
         gain.gain.value = 0.0;
 
         audio
@@ -60,8 +69,20 @@ export class AudioManager {
             gain,
             audio,
             source.rpm,
-            source.volume
+            source.volume ?? 1.0
         )
+    }
+
+    setMasterVolume(value: number) {
+        if (this.volume) {
+            this.volume.gain.value = clamp(value, 0, 1);
+        }
+    }
+
+    muteAll() {
+        for (const key in this.samples) {
+            this.samples[key].gain.gain.value = 0;
+        }
     }
 
     static crossFade(value: number, start: number, end: number) {
@@ -77,7 +98,12 @@ export class AudioManager {
     }
 
     public dispose() {
-        if (this.ctx)
-            this.ctx.close();
+        this.muteAll();
+        if (this.ctx) {
+            void this.ctx.close();
+            this.ctx = null;
+            this.volume = null;
+            this.samples = {};
+        }
     }
 }

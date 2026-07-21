@@ -60,19 +60,17 @@ export class Drivetrain {
     }
 
     solvePos(engine: Engine, h: number) {
-        // const compliance = 0.01;
+        if (this.gear === 0)
+            return;
+
         const c = engine.theta - this.theta;
         const corr1 = this.getCorrection(c, h, this.compliance);
         this.theta += corr1 * Math.sign(c);
     }
 
     solveVel(engine: Engine, h: number) {
-        // let dv = 0;
-        // dv -= engine.omega;
-        // dv += this.omega;
-        // dv *= Math.min(1.0, 1 * h);
-
-        // this.omega += this.getCorrection(dv, h, 0.01);
+        if (this.gear === 0)
+            return;
 
         let damping = this.damping;
 
