@@ -12,7 +12,7 @@ function instructionFor(type: string, modifier: string | undefined, name: string
 
   switch (type) {
     case 'depart':
-      return name ? `Head toward ${name}` : 'Depart'
+      return name ? `Head on ${name}` : 'Continue straight'
     case 'arrive':
       return 'You have arrived'
     case 'roundabout':

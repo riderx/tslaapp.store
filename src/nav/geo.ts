@@ -14,6 +14,25 @@ export function haversine(a: LatLng, b: LatLng): number {
   return 2 * EARTH * Math.asin(Math.sqrt(h))
 }
 
+/** Move `distMeters` along compass bearing from a point (for camera look-ahead). */
+export function offsetAlongBearing(origin: LatLng, bearingDeg: number, distMeters: number): LatLng {
+  const R = 6371000
+  const br = (bearingDeg * Math.PI) / 180
+  const lat1 = (origin.lat * Math.PI) / 180
+  const lng1 = (origin.lng * Math.PI) / 180
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(distMeters / R) +
+      Math.cos(lat1) * Math.sin(distMeters / R) * Math.cos(br),
+  )
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(br) * Math.sin(distMeters / R) * Math.cos(lat1),
+      Math.cos(distMeters / R) - Math.sin(lat1) * Math.sin(lat2),
+    )
+  return { lat: (lat2 * 180) / Math.PI, lng: (lng2 * 180) / Math.PI }
+}
+
 export function bearing(a: LatLng, b: LatLng): number {
   const toRad = (d: number) => (d * Math.PI) / 180
   const toDeg = (r: number) => (r * 180) / Math.PI
@@ -85,11 +104,22 @@ export type NavProgress = {
   bearing: number
 }
 
+function isPassiveStep(step: NavStep): boolean {
+  // Skip "just keep going" steps — banner should show the next real turn (Google-style).
+  const t = step.type
+  if (t === 'depart' || t === 'notification') return true
+  if (t === 'arrive') return false
+  const mod = (step.modifier || 'straight').toLowerCase()
+  if (t === 'continue' || t === 'new name') {
+    return mod === 'straight' || mod === ''
+  }
+  return false
+}
+
 export function computeProgress(position: LatLng, route: RouteResult, heading?: number): NavProgress {
   const proj = projectOnRoute(position, route.geometry)
   const offRoute = proj.distanceToRoute > 60
 
-  // Cumulative step end distances
   let acc = 0
   const stepEnds: number[] = []
   for (const step of route.steps) {
@@ -105,18 +135,36 @@ export function computeProgress(position: LatLng, route: RouteResult, heading?: 
     }
     stepIndex = i
   }
-  // Skip tiny arrive flicker: keep previous until close
   if (stepIndex >= route.steps.length) stepIndex = route.steps.length - 1
 
-  const step = route.steps[stepIndex]
+  // While on depart, preview the next turn (icon + text) with distance until that turn
+  let displayIndex = stepIndex
+  if (isPassiveStep(route.steps[stepIndex])) {
+    for (let i = stepIndex + 1; i < route.steps.length; i++) {
+      if (!isPassiveStep(route.steps[i]) && route.steps[i].type !== 'notification') {
+        displayIndex = i
+        break
+      }
+    }
+  }
+
+  const step = route.steps[displayIndex]
   const distanceToManeuver = Math.max(0, stepEnds[stepIndex] - proj.distanceAlong)
   const distanceRemaining = Math.max(0, route.distance - proj.distanceAlong)
   const ratio = route.distance > 0 ? distanceRemaining / route.distance : 0
   const durationRemaining = route.duration * ratio
 
-  // Look ahead for bearing along route
-  const look = route.geometry[Math.min(proj.segmentIndex + 1, route.geometry.length - 1)]
+  // Look further ahead along the route so course stays stable
+  const lookIdx = Math.min(proj.segmentIndex + 3, route.geometry.length - 1)
+  const look = route.geometry[lookIdx]
   const routeBearing = bearing(proj.nearest, look)
+  // GPS heading is unreliable (often 0). Nav map uses route course so "up" = travel direction.
+  const gpsOk =
+    heading != null &&
+    !Number.isNaN(heading) &&
+    heading >= 0 &&
+    // ignore exact 0 unless route also says ~north (phones often report 0 when unknown)
+    !(heading === 0 && Math.abs(((routeBearing + 180) % 360) - 180) > 25)
 
   return {
     stepIndex,
@@ -125,6 +173,7 @@ export function computeProgress(position: LatLng, route: RouteResult, heading?: 
     distanceRemaining,
     durationRemaining,
     offRoute,
-    bearing: heading ?? routeBearing,
+    bearing: gpsOk ? heading! : routeBearing,
+    segmentIndex: proj.segmentIndex,
   }
 }

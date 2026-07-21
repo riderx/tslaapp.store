@@ -23,6 +23,7 @@
     "@cloudflare/workers-types": "^4.20250417.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/glob": "^9.0.0",
+    "@types/google.maps": "^3.65.2",
     "@types/node": "^26.1.1",
     "@vitejs/plugin-vue": "^6.0.8",
     "autoprefixer": "^10.5.4",
