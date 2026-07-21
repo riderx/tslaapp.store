@@ -14,6 +14,42 @@ function createPeerConnection() {
   })
 }
 
+function isMicDenied(err: unknown) {
+  if (!err || typeof err !== 'object') return false
+  const e = err as DOMException
+  const name = e.name || ''
+  const msg = String(e.message || '').toLowerCase()
+  return (
+    name === 'NotAllowedError' ||
+    name === 'SecurityError' ||
+    name === 'NotFoundError' ||
+    name === 'NotReadableError' ||
+    msg.includes('permission') ||
+    msg.includes('denied')
+  )
+}
+
+/** Unlock autoplay on locked-down browsers (Tesla) while we still have a user gesture. */
+async function unlockAudioPlayback() {
+  try {
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext
+    if (Ctx) {
+      const ctx = new Ctx()
+      await ctx.resume().catch(() => null)
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      gain.gain.value = 0.0001
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start()
+      osc.stop(ctx.currentTime + 0.05)
+      window.setTimeout(() => ctx.close().catch(() => null), 200)
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export class GroupCallClient {
   groupId: string
   sessionId: string | null = null
@@ -22,6 +58,8 @@ export class GroupCallClient {
   localTrackName: string | null = null
   remoteAudio = new Map<string, HTMLAudioElement>()
   muted = false
+  /** False when browser/car blocks microphone (common in Tesla). */
+  micAvailable = true
   onRemoteChange?: () => void
 
   constructor(groupId: string) {
@@ -31,44 +69,59 @@ export class GroupCallClient {
   async join(existingTracks: RemoteTrackInfo[] = []) {
     const join = await friendsApi.joinCall(this.groupId)
     this.sessionId = join.sessionId
-
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-      video: false,
-    })
+    await unlockAudioPlayback()
 
     this.pc = createPeerConnection()
-    const track = this.localStream.getAudioTracks()[0]
-    this.localTrackName = track.id
-    const transceiver = this.pc.addTransceiver(track, { direction: 'sendonly' })
-    const offer = await this.pc.createOffer()
-    await this.pc.setLocalDescription(offer)
 
-    const push = await friendsApi.tracks(this.groupId, {
-      sessionId: this.sessionId,
-      sessionDescription: { sdp: offer.sdp, type: 'offer' },
-      tracks: [
-        {
-          location: 'local',
-          mid: transceiver.mid,
-          trackName: track.id,
+    let track: MediaStreamTrack | null = null
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new DOMException('getUserMedia unavailable', 'NotAllowedError')
+      }
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
         },
-      ],
-      publish: { trackName: track.id },
-    })
+        video: false,
+      })
+      track = this.localStream.getAudioTracks()[0] || null
+    } catch (err) {
+      if (!isMicDenied(err)) throw err
+      this.micAvailable = false
+      this.muted = true
+      this.localStream = null
+      track = null
+    }
 
-    await this.pc.setRemoteDescription(
-      new RTCSessionDescription(push.result.sessionDescription),
+    if (track) {
+      this.localTrackName = track.id
+      const transceiver = this.pc.addTransceiver(track, { direction: 'sendonly' })
+      const offer = await this.pc.createOffer()
+      await this.pc.setLocalDescription(offer)
+
+      const push = await friendsApi.tracks(this.groupId, {
+        sessionId: this.sessionId,
+        sessionDescription: { sdp: offer.sdp, type: 'offer' },
+        tracks: [
+          {
+            location: 'local',
+            mid: transceiver.mid,
+            trackName: track.id,
+          },
+        ],
+        publish: { trackName: track.id },
+      })
+
+      await this.pc.setRemoteDescription(
+        new RTCSessionDescription(push.result.sessionDescription),
+      )
+    }
+
+    const others = [...existingTracks, ...(join.tracks || [])].filter(
+      (t, i, arr) => arr.findIndex((x) => x.trackName === t.trackName) === i,
     )
-
-    const others = [
-      ...existingTracks,
-      ...(join.tracks || []),
-    ].filter((t, i, arr) => arr.findIndex((x) => x.trackName === t.trackName) === i)
 
     for (const t of others) {
       await this.pullTrack(t)
@@ -116,6 +169,7 @@ export class GroupCallClient {
     const remoteTrack = await trackPromise
     const audio = new Audio()
     audio.autoplay = true
+    audio.setAttribute('playsinline', 'true')
     audio.srcObject = new MediaStream([remoteTrack])
     await audio.play().catch(() => null)
     this.remoteAudio.set(info.trackName, audio)
@@ -123,6 +177,10 @@ export class GroupCallClient {
   }
 
   setMuted(muted: boolean) {
+    if (!this.micAvailable) {
+      this.muted = true
+      return
+    }
     this.muted = muted
     this.localStream?.getAudioTracks().forEach((t) => {
       t.enabled = !muted
@@ -130,6 +188,7 @@ export class GroupCallClient {
   }
 
   toggleMute() {
+    if (!this.micAvailable) return true
     this.setMuted(!this.muted)
     return this.muted
   }
