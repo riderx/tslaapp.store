@@ -1,0 +1,3 @@
+# Local only (copy to .dev.vars). Worker secrets in prod are set via wrangler secret.
+CALLS_APP_ID=
+CALLS_APP_SECRET=

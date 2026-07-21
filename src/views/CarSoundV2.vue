@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, shallowRef, onUnmounted, computed } from 'vue'
-import { Pause, Play, Volume2, Settings, X, ZapIcon } from 'lucide-vue-next'
+import { Pause, Play, Volume2, Settings, X, ZapIcon, Mic, MicOff } from 'lucide-vue-next'
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
 import { SHIFT_MODE_LIST, type ShiftMode } from '../engineV2/shiftModes'
+import { useCallStore } from '@/stores/callStore'
+
+const callStore = useCallStore()
 
 // Vehicle and engine state
 const vehicle = shallowRef<Vehicle | null>(null)
@@ -74,6 +77,56 @@ const togglePlay = async () => {
     isPlaying.value = false
   }
 }
+
+const callActive = computed(() => callStore.phase === 'ringing' || callStore.phase === 'in_call' || callStore.phase === 'connecting')
+let callPressTimer: number | null = null
+let callLongFired = false
+
+async function onPlayPointerDown() {
+  if (callStore.phase !== 'in_call') return
+  callLongFired = false
+  callPressTimer = window.setTimeout(async () => {
+    callPressTimer = null
+    callLongFired = true
+    await callStore.hangUp()
+  }, 650)
+}
+
+function clearCallPress() {
+  if (callPressTimer) {
+    clearTimeout(callPressTimer)
+    callPressTimer = null
+  }
+}
+
+async function onPlayPointerUp() {
+  const wasLong = callLongFired
+  clearCallPress()
+  if (wasLong) return
+  if (callStore.phase === 'in_call') callStore.toggleMute()
+}
+
+async function onUnifiedPlayClick() {
+  if (callStore.phase === 'ringing') {
+    await callStore.answerCall()
+    return
+  }
+  if (callStore.phase === 'in_call' || callStore.phase === 'connecting') return
+  await togglePlay()
+}
+
+const playButtonLabel = computed(() => {
+  if (callStore.phase === 'ringing') return 'Answer Call'
+  if (callStore.phase === 'connecting') return 'Connecting…'
+  if (callStore.phase === 'in_call') return callStore.muted ? 'Unmute Mic' : 'Mute Mic'
+  return isPlaying.value ? 'Stop Engine' : 'Start Engine'
+})
+
+const playButtonIcon = computed(() => {
+  if (callStore.phase === 'ringing') return Play
+  if (callStore.phase === 'in_call') return callStore.muted ? MicOff : Mic
+  return isPlaying.value ? Pause : Play
+})
 
 // Initialize vehicle with selected configuration
 const disposeVehicle = () => {
@@ -531,10 +584,19 @@ const toggleSettings = () => {
           />
         </div>
         
-        <button class="play-button" @click="togglePlay">
-          <component :is="isPlaying ? Pause : Play" class="play-icon" />
-          <span>{{ isPlaying ? 'Stop' : 'Start' }} Engine</span>
+        <button
+          class="play-button"
+          :class="{ 'call-mode': callActive, muted: callStore.muted }"
+          @click="onUnifiedPlayClick"
+          @pointerdown="onPlayPointerDown"
+          @pointerup="onPlayPointerUp"
+          @pointerleave="clearCallPress"
+          @pointercancel="onPlayPointerUp"
+        >
+          <component :is="playButtonIcon" class="play-icon" />
+          <span>{{ playButtonLabel }}</span>
         </button>
+        <p v-if="callStore.phase === 'in_call'" class="call-hint">Tap mute · hold to end call</p>
 
         <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
 
@@ -896,6 +958,18 @@ const toggleSettings = () => {
 
 .play-button:hover {
   background-color: #c91c21;
+}
+.play-button.call-mode {
+  box-shadow: 0 0 0 2px rgba(232,33,39,0.35);
+}
+.play-button.muted {
+  background-color: #444;
+}
+.call-hint {
+  margin-top: 0.5rem;
+  text-align: center;
+  color: #888;
+  font-size: 0.8rem;
 }
 
 .error-message {
