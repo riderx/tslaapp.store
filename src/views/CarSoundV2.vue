@@ -273,13 +273,13 @@ const handleConfigChange = async (e: Event) => {
 // Gear shifting
 const shiftUp = () => {
   if (vehicle.value && isPlaying.value) {
-    vehicle.value.drivetrain.nextGear()
+    vehicle.value.nextGear()
   }
 }
 
 const shiftDown = () => {
   if (vehicle.value && isPlaying.value) {
-    vehicle.value.drivetrain.prevGear()
+    vehicle.value.prevGear()
   }
 }
 

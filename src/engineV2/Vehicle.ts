@@ -38,7 +38,8 @@ export class Vehicle {
         const subSteps = 20;
         const h = dt / subSteps;
 
-        const I = this.getLoadInertia() * 0.00;
+        /* Light virtual load for parked sound-sim */
+        const I = this.getLoadInertia() * 0.08;
 
         for (let i = 0; i < subSteps; i++) {
             
@@ -62,7 +63,7 @@ export class Vehicle {
         // }
 
         if (this.audio.ctx)
-            this.engine.applySounds(this.audio.samples, this.drivetrain.gear);
+            this.engine.applySounds(this.audio.samples, this.drivetrain.getGearRatio());
     }
 
     getLoadInertia() {
@@ -83,6 +84,19 @@ export class Vehicle {
         const I = I1 + I2 + I3;
 
         return I;
+    }
+
+
+    nextGear() {
+        this.drivetrain.nextGear(this.engine);
+    }
+
+    prevGear() {
+        this.drivetrain.prevGear(this.engine);
+    }
+
+    changeGear(gear: number) {
+        this.drivetrain.changeGear(gear, this.engine);
     }
 
 }

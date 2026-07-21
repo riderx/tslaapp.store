@@ -26,12 +26,19 @@ export class Drivetrain {
 
     shiftTime = 50;
 
+    private shiftTimer: ReturnType<typeof setTimeout> | null = null;
+
     constructor() {
         this.init();
     }
 
     init(config?: Partial<Drivetrain>) {
         if (config) Object.assign(this, config);
+
+        if (this.shiftTimer) {
+            clearTimeout(this.shiftTimer);
+            this.shiftTimer = null;
+        }
 
         this.theta = 0;
         this.omega = 0;
@@ -41,6 +48,15 @@ export class Drivetrain {
         this.omega_wheel = 0;
 
         this.gear = 0;
+        this.downShift = false;
+    }
+
+    /** Lock drivetrain shaft state to the engine before engaging a gear. */
+    syncToEngine(engine: Engine) {
+        this.theta = engine.theta;
+        this.prevTheta = engine.theta;
+        this.omega = engine.omega;
+        this.prevOmega = engine.omega;
     }
 
     integrate(dt: number) {
@@ -72,12 +88,13 @@ export class Drivetrain {
         if (this.gear === 0)
             return;
 
-        let damping = this.damping;
+        let damping = Math.min(this.damping, 5);
 
         if (this.gear > 3)
-            damping = this.damping * 0.75;
+            damping *= 0.75;
 
         this.omega += (engine.omega - this.omega) * damping * h;
+        if (this.omega < 0) this.omega = 0;
     }
 
     getCorrection(corr: number, h: number, compliance = 0) {
@@ -109,39 +126,56 @@ export class Drivetrain {
         return this.getGearRatio() * this.getFinalDriveRatio();
     }
 
-    changeGear(gear: number) {
-
-        const prevRatio = this.getGearRatio(this.gear);
-        const nextRatio = this.getGearRatio(gear);
-        const ratioRatio = prevRatio > 0 ? nextRatio / prevRatio : 0;
-
-        if (ratioRatio === 1)
+    changeGear(gear: number, engine?: Engine) {
+        gear = clamp(gear, 0, this.gears.length);
+        if (gear === this.gear)
             return;
 
-        /* Neutral */
-        this.gear = 0; 
+        const prevGear = this.gear;
+        const prevRatio = this.getGearRatio(prevGear);
+        const nextRatio = this.getGearRatio(gear);
 
-        if (ratioRatio > 1)
-            this.downShift = true;
+        /* Neutral while shifting */
+        this.gear = 0;
+        this.downShift = prevGear > 0 && gear > 0 && nextRatio > prevRatio;
 
-        /* Engage next gear */
-        setTimeout(() => {
-            this.omega = this.omega * ratioRatio;
+        if (this.shiftTimer) {
+            clearTimeout(this.shiftTimer);
+            this.shiftTimer = null;
+        }
+
+        const engage = () => {
+            this.shiftTimer = null;
+
+            if (gear === 0) {
+                this.gear = 0;
+                this.downShift = false;
+                return;
+            }
+
+            if (engine) {
+                /* Always match shaft to engine on engage — avoids theta/omega explosion after free-rev in N */
+                this.syncToEngine(engine);
+            } else if (prevRatio > 0 && nextRatio > 0) {
+                this.omega = this.omega * (nextRatio / prevRatio);
+            }
 
             this.gear = gear;
-            this.gear = clamp(gear, 0, this.gears.length);
             this.downShift = false;
+        };
 
-            console.log('Changed', this.gear);
-
-        }, this.shiftTime)
+        if (this.shiftTime <= 0) {
+            engage();
+        } else {
+            this.shiftTimer = setTimeout(engage, this.shiftTime);
+        }
     }
 
-    nextGear() {
-        this.changeGear(this.gear + 1);
+    nextGear(engine?: Engine) {
+        this.changeGear(this.gear + 1, engine);
     }
 
-    prevGear() {
-        this.changeGear(this.gear - 1);
+    prevGear(engine?: Engine) {
+        this.changeGear(this.gear - 1, engine);
     }
 }
