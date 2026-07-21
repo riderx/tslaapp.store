@@ -1,11 +1,18 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Activity, Gauge, Users, Zap, Volume2 } from 'lucide-vue-next'
+import { Activity, Gauge, Users, Zap, Volume2, Navigation } from 'lucide-vue-next'
 
 const router = useRouter()
 
 const apps = [
+  {
+    id: "nav",
+    name: "Navigation",
+    icon: Navigation,
+    available: true,
+    route: '/nav'
+  },
   {
     id: "speedtest",
     name: "Speedtest",
