@@ -66,7 +66,10 @@ onBeforeUnmount(clearPress)
         </div>
         <div class="title">{{ call.groupName }}</div>
         <div class="from" v-if="call.fromName">{{ call.fromName }}</div>
-        <div class="hint" v-if="call.phase === 'in_call'">
+        <div class="hint" v-if="call.phase === 'in_call' && !call.micAvailable">
+          Mic blocked in this browser — listening only. Speak from your phone.
+        </div>
+        <div class="hint" v-else-if="call.phase === 'in_call'">
           Tap to mute mic · hold to end call
         </div>
         <div class="error" v-if="call.error">{{ call.error }}</div>
