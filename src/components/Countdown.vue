@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { useSpeedStore } from '../stores/speedStore'
 
 const COUNTDOWN_STEPS = ['5', '4', '3', '2', '1', 'GO!']
 const speedStore = useSpeedStore()
 const countdownIndex = ref(-1)
 const countdownInterval = ref<number | null>(null)
+const hideTimeout = ref<number | null>(null)
 const showCountdown = ref(false)
 
 watch(() => speedStore.isRunning, (newValue) => {
@@ -16,26 +17,36 @@ watch(() => speedStore.isRunning, (newValue) => {
   }
 })
 
+onUnmounted(() => {
+  clearCountdown()
+})
+
 function clearCountdown() {
   if (countdownInterval.value) {
     clearInterval(countdownInterval.value)
     countdownInterval.value = null
+  }
+  if (hideTimeout.value) {
+    clearTimeout(hideTimeout.value)
+    hideTimeout.value = null
   }
   showCountdown.value = false
   countdownIndex.value = -1
 }
 
 function startCountdown() {
+  clearCountdown()
   showCountdown.value = true
   countdownIndex.value = 0
   
-  countdownInterval.value = setInterval(() => {
+  countdownInterval.value = window.setInterval(() => {
     countdownIndex.value++
     if (countdownIndex.value >= COUNTDOWN_STEPS.length) {
       clearInterval(countdownInterval.value!)
       countdownInterval.value = null
-      setTimeout(() => {
+      hideTimeout.value = window.setTimeout(() => {
         showCountdown.value = false
+        hideTimeout.value = null
       }, 1000)
     }
   }, 1000)

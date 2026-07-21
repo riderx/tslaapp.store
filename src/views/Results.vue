@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSpeedStore } from '../stores/speedStore'
 import SpeedGraph from '../components/SpeedGraph.vue'
@@ -7,6 +7,7 @@ import SpeedGraph from '../components/SpeedGraph.vue'
 const router = useRouter()
 const speedStore = useSpeedStore()
 const showAnimation = ref(true)
+let animationTimeout: number | null = null
 
 // If no test was completed, redirect back to test page
 onMounted(() => {
@@ -15,9 +16,17 @@ onMounted(() => {
   }
   
   // Hide animation after 3 seconds
-  setTimeout(() => {
+  animationTimeout = window.setTimeout(() => {
     showAnimation.value = false
+    animationTimeout = null
   }, 3000)
+})
+
+onUnmounted(() => {
+  if (animationTimeout !== null) {
+    clearTimeout(animationTimeout)
+    animationTimeout = null
+  }
 })
 
 const tryAgain = () => {
