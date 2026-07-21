@@ -43,6 +43,8 @@ const testAccelerationValue = ref(50)
 // Animation frame ID
 let animationId: number | null = null
 let lastTime = 0
+let testAccelTimer: ReturnType<typeof setTimeout> | null = null
+let watchId: number | null = null
 
 
 // Toggle play/pause
@@ -74,18 +76,23 @@ const togglePlay = async () => {
 }
 
 // Initialize vehicle with selected configuration
+const disposeVehicle = () => {
+  if (!vehicle.value) return
+  vehicle.value.dispose()
+  vehicle.value = null
+}
+
 const initVehicle = async () => {
   try {
     console.log('Initializing vehicle with configuration:', selectedConfig.value)
 
-    if (vehicle.value) {
-      vehicle.value.audio.dispose()
-    }
+    disposeVehicle()
     
-    vehicle.value = new Vehicle()
+    const next = new Vehicle()
     const config = configurations[selectedConfig.value] as EngineConfiguration
     
-    await vehicle.value.init(config)
+    await next.init(config)
+    vehicle.value = next
     
     // Update settings from configuration
     maxRpm.value = config.engine.limiter || 8000
@@ -99,7 +106,7 @@ const initVehicle = async () => {
     console.log('Vehicle initialized successfully')
   } catch (error) {
     console.error('Failed to initialize vehicle:', error)
-    vehicle.value = null
+    disposeVehicle()
     throw error
   }
 }
@@ -128,6 +135,12 @@ const stopEngine = () => {
   lastTime = 0
   isHoldingThrottle.value = false
   manualThrottle.value = 0
+
+  if (testAccelTimer) {
+    clearTimeout(testAccelTimer)
+    testAccelTimer = null
+  }
+  isAccelerating.value = false
   
   if (vehicle.value) {
     vehicle.value.engine.throttle = 0
@@ -138,15 +151,24 @@ const stopEngine = () => {
   window.removeEventListener('keydown', handleKeyDown)
   window.removeEventListener('keyup', handleKeyUp)
   
-  if (watchId) {
+  if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId)
+    watchId = null
   }
 }
 
 // Update loop for vehicle simulation
 const startUpdateLoop = () => {
+  if (animationId) {
+    cancelAnimationFrame(animationId)
+    animationId = null
+  }
+
   const update = (time: number) => {
-    if (!isPlaying.value || !vehicle.value) return
+    if (!isPlaying.value || !vehicle.value) {
+      animationId = null
+      return
+    }
     
     const dt = lastTime ? (time - lastTime) / 1000 : 0.016
     lastTime = time
@@ -215,10 +237,15 @@ const updateThrottle = () => {
 // Toggle test acceleration
 const toggleTestAcceleration = () => {
   isAccelerating.value = !isAccelerating.value
+  if (testAccelTimer) {
+    clearTimeout(testAccelTimer)
+    testAccelTimer = null
+  }
   if (isAccelerating.value) {
     // Schedule automatic stop after 3 seconds
-    setTimeout(() => {
+    testAccelTimer = setTimeout(() => {
       isAccelerating.value = false
+      testAccelTimer = null
     }, 3000)
   }
 }
@@ -271,9 +298,12 @@ const handleConfigChange = async (e: Event) => {
   if (isPlaying.value) {
     // Restart with new configuration
     stopEngine()
-    vehicle.value = null
+    disposeVehicle()
     await initVehicle()
+    isPlaying.value = true
     startEngine()
+  } else {
+    disposeVehicle()
   }
 }
 
@@ -316,6 +346,7 @@ const startSensors = () => {
           .then((state: string) => {
             if (state === 'granted') {
               hasAccelerometerPermission.value = true
+              window.removeEventListener('devicemotion', handleMotion)
               window.addEventListener('devicemotion', handleMotion)
             }
           })
@@ -323,6 +354,7 @@ const startSensors = () => {
       } else {
         // Permission not required
         hasAccelerometerPermission.value = true
+        window.removeEventListener('devicemotion', handleMotion)
         window.addEventListener('devicemotion', handleMotion)
       }
     } catch (error) {
@@ -357,8 +389,12 @@ const handleMotion = (event: DeviceMotionEvent) => {
 }
 
 // Watch position for speed calculation
-let watchId: number
 const startWatchingPosition = () => {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId)
+    watchId = null
+  }
+
   let lastPosition: GeolocationPosition | null = null
   let lastTime = 0
   
@@ -427,10 +463,7 @@ const gearDisplay = computed(() => {
 // Cleanup on component unmount
 onUnmounted(() => {
   stopEngine()
-  
-  if (vehicle.value) {
-    vehicle.value.audio.dispose()
-  }
+  disposeVehicle()
 })
 
 // Toggle settings panel

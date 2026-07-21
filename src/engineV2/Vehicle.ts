@@ -24,15 +24,20 @@ export class Vehicle {
     wheel_radius = 0.250;
 
     async init(configuration: EngineConfiguration) {
-        if (this.audio)
-            this.audio.dispose();
+        this.audio.dispose();
+        this.drivetrain.dispose();
 
         this.engine.init(configuration.engine);
         this.drivetrain.init(configuration.drivetrain);
 
         this.audio = new AudioManager();
-        
         await this.audio.init(configuration.sounds);
+    }
+
+    dispose() {
+        this.autoShiftEnabled = false;
+        this.drivetrain.dispose();
+        this.audio.dispose();
     }
 
     // https://github.com/markeasting/THREE-XPBD

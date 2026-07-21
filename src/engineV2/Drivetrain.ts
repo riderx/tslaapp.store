@@ -32,11 +32,22 @@ export class Drivetrain {
         return this.shiftTimer !== null;
     }
 
+    private disposed = false;
+
+    dispose() {
+        this.disposed = true;
+        if (this.shiftTimer) {
+            clearTimeout(this.shiftTimer);
+            this.shiftTimer = null;
+        }
+    }
+
     constructor() {
         this.init();
     }
 
     init(config?: Partial<Drivetrain>) {
+        this.disposed = false;
         if (config) Object.assign(this, config);
 
         if (this.shiftTimer) {
@@ -150,6 +161,8 @@ export class Drivetrain {
 
         const engage = () => {
             this.shiftTimer = null;
+            if (this.disposed)
+                return;
 
             if (gear === 0) {
                 this.gear = 0;
