@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, shallowRef, onUnmounted, computed, watch } from 'vue'
-import { Pause, Play, Volume2, Settings, X } from 'lucide-vue-next'
+import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
+import { Volume2, Settings, X } from 'lucide-vue-next'
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
@@ -9,7 +9,7 @@ import { SHIFT_MODE_LIST, type ShiftMode } from '../engineV2/shiftModes'
 const MANUAL_RETURN_MS = 8000
 
 const vehicle = shallowRef<Vehicle | null>(null)
-const isPlaying = ref(false)
+const engineReady = ref(false)
 const showSettings = ref(false)
 const errorMessage = ref('')
 
@@ -90,13 +90,13 @@ const enterManualMode = () => {
 }
 
 const shiftUpManual = () => {
-  if (!vehicle.value || !isPlaying.value) return
+  if (!vehicle.value || !engineReady.value) return
   enterManualMode()
   vehicle.value.nextGear()
 }
 
 const shiftDownManual = () => {
-  if (!vehicle.value || !isPlaying.value) return
+  if (!vehicle.value || !engineReady.value) return
   enterManualMode()
   vehicle.value.prevGear()
 }
@@ -303,7 +303,7 @@ const startUpdateLoop = () => {
   }
 
   const update = (time: number) => {
-    if (!isPlaying.value || !vehicle.value) {
+    if (!engineReady.value || !vehicle.value) {
       animationId = null
       return
     }
@@ -346,7 +346,8 @@ const initVehicle = async () => {
   }
 }
 
-const stopEngine = () => {
+const teardownEngine = () => {
+  engineReady.value = false
   if (animationId) {
     cancelAnimationFrame(animationId)
     animationId = null
@@ -356,64 +357,63 @@ const stopEngine = () => {
   unbindMediaKeys()
   stopAccelerometer()
   stopGeolocation()
+  disposeVehicle()
+}
 
-  if (vehicle.value) {
-    vehicle.value.engine.throttle = 0
-    vehicle.value.audio.muteAll()
+const resumeAudioIfNeeded = async () => {
+  const ctx = vehicle.value?.audio.ctx
+  if (ctx && ctx.state === 'suspended') {
+    try {
+      await ctx.resume()
+    } catch (error) {
+      console.warn('Audio resume failed', error)
+    }
   }
 }
 
-const startEngine = () => {
-  if (!vehicle.value) return
-  void vehicle.value.audio.ctx?.resume()
-  updateVolume()
-  autoShiftEnabled.value = true
-  syncAutoShift()
-  startSensors()
-  bindMediaKeys()
-  startUpdateLoop()
-}
-
-const togglePlay = async () => {
+const bootEngine = async () => {
   try {
     errorMessage.value = ''
-    if (isPlaying.value) {
-      stopEngine()
-      isPlaying.value = false
-      return
-    }
-
-    if (!vehicle.value) await initVehicle()
+    await initVehicle()
     if (!vehicle.value) {
       errorMessage.value = 'Failed to start engine.'
       return
     }
 
-    isPlaying.value = true
-    startEngine()
+    await resumeAudioIfNeeded()
+    updateVolume()
+    autoShiftEnabled.value = true
+    syncAutoShift()
+    startSensors()
+    bindMediaKeys()
+    engineReady.value = true
+    startUpdateLoop()
+
+    // Browsers may keep AudioContext suspended until a gesture — unlock on first tap
+    const unlock = () => {
+      void resumeAudioIfNeeded()
+      window.removeEventListener('pointerdown', unlock)
+    }
+    window.addEventListener('pointerdown', unlock, { once: true })
   } catch (error) {
     console.error(error)
     errorMessage.value = error instanceof Error ? error.message : 'Failed to start engine'
-    isPlaying.value = false
+    teardownEngine()
   }
 }
 
 const handleConfigChange = async (e: Event) => {
   selectedConfig.value = (e.target as HTMLSelectElement).value as keyof typeof configurations
-  if (isPlaying.value) {
-    stopEngine()
-    disposeVehicle()
-    await initVehicle()
-    isPlaying.value = true
-    startEngine()
-  } else {
-    disposeVehicle()
-  }
+  teardownEngine()
+  await bootEngine()
 }
 
+onMounted(() => {
+  void bootEngine()
+})
+
 onUnmounted(() => {
-  stopEngine()
-  disposeVehicle()
+  teardownEngine()
 })
 
 watch(shiftMode, () => syncAutoShift())
@@ -472,11 +472,8 @@ watch(shiftMode, () => syncAutoShift())
         </div>
       </div>
 
-      <p class="help-text" v-if="isPlaying">
-        Sound follows car movement (GPS + accel). Steering next/prev changes gear (manual), then returns to Auto.
-      </p>
-      <p class="help-text" v-else>
-        Start the engine, then drive — throttle comes from movement only.
+      <p class="help-text">
+        Engine runs while this page is open. Sound follows movement (GPS + accel). Steering next/prev changes gear (manual), then returns to Auto.
       </p>
 
       <div class="controls">
@@ -492,14 +489,10 @@ watch(shiftMode, () => syncAutoShift())
           />
         </div>
 
-        <button class="play-button" @click="togglePlay">
-          <component :is="isPlaying ? Pause : Play" class="play-icon" />
-          <span>{{ isPlaying ? 'Stop' : 'Start' }} Engine</span>
-        </button>
-
         <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
+        <p v-else-if="!engineReady" class="help-text">Starting engine…</p>
 
-        <div class="shift-modes" v-if="isPlaying">
+        <div class="shift-modes">
           <button
             v-for="mode in SHIFT_MODE_LIST"
             :key="mode.id"
@@ -703,24 +696,6 @@ watch(shiftMode, () => syncAutoShift())
   background-color: white;
   cursor: pointer;
 }
-
-.play-button {
-  width: 100%;
-  padding: 1rem;
-  background-color: #e82127;
-  color: white;
-  border: none;
-  border-radius: 0.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.play-icon { width: 1.5rem; height: 1.5rem; }
 
 .error-message {
   margin-top: 0.75rem;
