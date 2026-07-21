@@ -4,6 +4,7 @@ import { Pause, Play, Volume2, Settings, X, ZapIcon, Mic, MicOff } from 'lucide-
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
+import { SHIFT_MODE_LIST, type ShiftMode } from '../engineV2/shiftModes'
 import { useCallStore } from '@/stores/callStore'
 
 const callStore = useCallStore()
@@ -35,6 +36,8 @@ const sensitivity = ref(50)
 const useGps = ref(false)
 const useAccelerometer = ref(false)
 const selectedConfig = ref<keyof typeof configurations>('bac_mono')
+const autoShiftEnabled = ref(true)
+const shiftMode = ref<ShiftMode>('average')
 
 // Test acceleration
 const isAccelerating = ref(false)
@@ -43,6 +46,8 @@ const testAccelerationValue = ref(50)
 // Animation frame ID
 let animationId: number | null = null
 let lastTime = 0
+let testAccelTimer: ReturnType<typeof setTimeout> | null = null
+let watchId: number | null = null
 
 
 // Toggle play/pause
@@ -124,18 +129,23 @@ const playButtonIcon = computed(() => {
 })
 
 // Initialize vehicle with selected configuration
+const disposeVehicle = () => {
+  if (!vehicle.value) return
+  vehicle.value.dispose()
+  vehicle.value = null
+}
+
 const initVehicle = async () => {
   try {
     console.log('Initializing vehicle with configuration:', selectedConfig.value)
 
-    if (vehicle.value) {
-      vehicle.value.audio.dispose()
-    }
+    disposeVehicle()
     
-    vehicle.value = new Vehicle()
+    const next = new Vehicle()
     const config = configurations[selectedConfig.value] as EngineConfiguration
     
-    await vehicle.value.init(config)
+    await next.init(config)
+    vehicle.value = next
     
     // Update settings from configuration
     maxRpm.value = config.engine.limiter || 8000
@@ -144,11 +154,12 @@ const initVehicle = async () => {
     
     // Set initial volume
     updateVolume()
+    syncAutoShift()
     
     console.log('Vehicle initialized successfully')
   } catch (error) {
     console.error('Failed to initialize vehicle:', error)
-    vehicle.value = null
+    disposeVehicle()
     throw error
   }
 }
@@ -160,6 +171,7 @@ const startEngine = () => {
   // Resume audio after user gesture
   void vehicle.value.audio.ctx?.resume()
   updateVolume()
+  syncAutoShift()
   
   startSensors()
   window.addEventListener('keydown', handleKeyDown)
@@ -176,6 +188,12 @@ const stopEngine = () => {
   lastTime = 0
   isHoldingThrottle.value = false
   manualThrottle.value = 0
+
+  if (testAccelTimer) {
+    clearTimeout(testAccelTimer)
+    testAccelTimer = null
+  }
+  isAccelerating.value = false
   
   if (vehicle.value) {
     vehicle.value.engine.throttle = 0
@@ -186,15 +204,24 @@ const stopEngine = () => {
   window.removeEventListener('keydown', handleKeyDown)
   window.removeEventListener('keyup', handleKeyUp)
   
-  if (watchId) {
+  if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId)
+    watchId = null
   }
 }
 
 // Update loop for vehicle simulation
 const startUpdateLoop = () => {
+  if (animationId) {
+    cancelAnimationFrame(animationId)
+    animationId = null
+  }
+
   const update = (time: number) => {
-    if (!isPlaying.value || !vehicle.value) return
+    if (!isPlaying.value || !vehicle.value) {
+      animationId = null
+      return
+    }
     
     const dt = lastTime ? (time - lastTime) / 1000 : 0.016
     lastTime = time
@@ -209,7 +236,9 @@ const startUpdateLoop = () => {
       // Update display values
       rpm.value = vehicle.value.engine.rpm
       throttle.value = vehicle.value.engine.throttle
-      gear.value = vehicle.value.drivetrain.gear
+      if (!vehicle.value.drivetrain.isShifting) {
+        gear.value = vehicle.value.drivetrain.gear
+      }
     }
     
     animationId = requestAnimationFrame(update)
@@ -261,10 +290,15 @@ const updateThrottle = () => {
 // Toggle test acceleration
 const toggleTestAcceleration = () => {
   isAccelerating.value = !isAccelerating.value
+  if (testAccelTimer) {
+    clearTimeout(testAccelTimer)
+    testAccelTimer = null
+  }
   if (isAccelerating.value) {
     // Schedule automatic stop after 3 seconds
-    setTimeout(() => {
+    testAccelTimer = setTimeout(() => {
       isAccelerating.value = false
+      testAccelTimer = null
     }, 3000)
   }
 }
@@ -317,23 +351,42 @@ const handleConfigChange = async (e: Event) => {
   if (isPlaying.value) {
     // Restart with new configuration
     stopEngine()
-    vehicle.value = null
+    disposeVehicle()
     await initVehicle()
+    isPlaying.value = true
     startEngine()
+  } else {
+    disposeVehicle()
   }
 }
 
 // Gear shifting
 const shiftUp = () => {
   if (vehicle.value && isPlaying.value) {
-    vehicle.value.drivetrain.nextGear()
+    vehicle.value.nextGear()
   }
 }
 
 const shiftDown = () => {
   if (vehicle.value && isPlaying.value) {
-    vehicle.value.drivetrain.prevGear()
+    vehicle.value.prevGear()
   }
+}
+
+const syncAutoShift = () => {
+  if (!vehicle.value) return
+  vehicle.value.autoShiftEnabled = autoShiftEnabled.value
+  vehicle.value.setShiftMode(shiftMode.value)
+}
+
+const handleAutoShiftToggle = () => {
+  autoShiftEnabled.value = !autoShiftEnabled.value
+  syncAutoShift()
+}
+
+const selectShiftMode = (mode: ShiftMode) => {
+  shiftMode.value = mode
+  syncAutoShift()
 }
 
 // Start sensor monitoring
@@ -346,6 +399,7 @@ const startSensors = () => {
           .then((state: string) => {
             if (state === 'granted') {
               hasAccelerometerPermission.value = true
+              window.removeEventListener('devicemotion', handleMotion)
               window.addEventListener('devicemotion', handleMotion)
             }
           })
@@ -353,6 +407,7 @@ const startSensors = () => {
       } else {
         // Permission not required
         hasAccelerometerPermission.value = true
+        window.removeEventListener('devicemotion', handleMotion)
         window.addEventListener('devicemotion', handleMotion)
       }
     } catch (error) {
@@ -387,8 +442,12 @@ const handleMotion = (event: DeviceMotionEvent) => {
 }
 
 // Watch position for speed calculation
-let watchId: number
 const startWatchingPosition = () => {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId)
+    watchId = null
+  }
+
   let lastPosition: GeolocationPosition | null = null
   let lastTime = 0
   
@@ -457,10 +516,7 @@ const gearDisplay = computed(() => {
 // Cleanup on component unmount
 onUnmounted(() => {
   stopEngine()
-  
-  if (vehicle.value) {
-    vehicle.value.audio.dispose()
-  }
+  disposeVehicle()
 })
 
 // Toggle settings panel
@@ -567,12 +623,37 @@ const toggleSettings = () => {
         </div>
         
         <div class="gear-controls" v-if="isPlaying">
-          <button class="gear-button" @click="shiftDown" :disabled="gear <= 0">
+          <button class="gear-button" @click="shiftDown" :disabled="gear <= 0 || autoShiftEnabled">
             ↓ Shift Down
           </button>
-          <button class="gear-button" @click="shiftUp" :disabled="gear >= 6">
+          <button class="gear-button" @click="shiftUp" :disabled="gear >= 6 || autoShiftEnabled">
             ↑ Shift Up
           </button>
+        </div>
+
+        <div class="auto-shift" v-if="isPlaying">
+          <button
+            class="auto-toggle"
+            :class="{ active: autoShiftEnabled }"
+            @click="handleAutoShiftToggle"
+          >
+            Auto Shift {{ autoShiftEnabled ? 'On' : 'Off' }}
+          </button>
+          <div class="shift-modes" :class="{ disabled: !autoShiftEnabled }">
+            <button
+              v-for="mode in SHIFT_MODE_LIST"
+              :key="mode.id"
+              class="mode-button"
+              :class="{ active: shiftMode === mode.id }"
+              :disabled="!autoShiftEnabled"
+              @click="selectShiftMode(mode.id)"
+            >
+              {{ mode.label }}
+            </button>
+          </div>
+          <p class="mode-hint">
+            {{ shiftMode === 'chill' ? 'Early, smooth shifts' : shiftMode === 'assertive' ? 'Holds gears near redline' : 'Balanced shift points' }}
+          </p>
         </div>
       </div>
     </div>
@@ -953,6 +1034,69 @@ const toggleSettings = () => {
 .play-icon {
   width: 1.5rem;
   height: 1.5rem;
+}
+
+
+.auto-shift {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.auto-toggle {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.auto-toggle.active {
+  background-color: rgba(232, 33, 39, 0.25);
+  border-color: #e82127;
+}
+
+.shift-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+
+.shift-modes.disabled {
+  opacity: 0.45;
+}
+
+.mode-button {
+  padding: 0.65rem 0.25rem;
+  background-color: rgba(255, 255, 255, 0.06);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.mode-button.active {
+  background-color: rgba(232, 33, 39, 0.35);
+  border-color: #e82127;
+}
+
+.mode-button:disabled {
+  cursor: not-allowed;
+}
+
+.mode-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: center;
 }
 
 .gear-controls {

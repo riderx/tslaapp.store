@@ -4,7 +4,6 @@ import SpeedTest from './views/SpeedTest.vue'
 import CarSound from './views/CarSound.vue'
 import CarSoundV2 from './views/CarSoundV2.vue'
 import Results from './views/Results.vue'
-import Nav from './views/Nav.vue'
 import Friends from './views/Friends.vue'
 
 export default createRouter({
@@ -15,7 +14,7 @@ export default createRouter({
     { path: '/car-sound', component: CarSound },
     { path: '/car-sound-v2', component: CarSoundV2 },
     { path: '/results', component: Results },
-    { path: '/nav', component: Nav },
+    { path: '/nav', component: () => import('./views/Nav.vue') },
     { path: '/friends', component: Friends },
   ],
 })
