@@ -121,11 +121,13 @@ export class Engine {
         if (drivetrain.gear === 0)
             return;
 
-        let damping = 12;
+        /* Soft lock — hard damping with mismatched shaft speeds kills RPM on upshift */
+        let damping = 4;
         if (drivetrain.gear > 3)
-            damping = 9;
+            damping = 3;
 
         this.omega += (drivetrain.omega - this.omega) * damping * h;
+        if (this.omega < 0) this.omega = 0;
     }
 
     getCorrection(corr: number, h: number, compliance = 0) {
