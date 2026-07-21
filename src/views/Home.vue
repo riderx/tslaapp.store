@@ -52,8 +52,8 @@ const apps = [
     id: "friends",
     name: "Friends",
     icon: Users,
-    available: false,
-    comingSoon: true,
+    available: true,
+    route: '/friends'
   },
 ]
 

@@ -1,14 +1,7 @@
 {
   "name": "worker-tslaapp",
-  "assets": {
-    "directory": "./dist",
-    "not_found_handling": "single-page-application"
-  },
+  "main": "worker/index.ts",
   "compatibility_date": "2025-04-01",
-  "route": {
-    "pattern": "tslap.store",
-    "custom_domain": true
-  },
   "compatibility_flags": [
     "nodejs_compat_v2"
   ],
@@ -17,5 +10,48 @@
     "enabled": true,
     "head_sampling_rate": 1
   },
-  "upload_source_maps": true
-} 
+  "upload_source_maps": true,
+  "route": {
+    "pattern": "tslap.store",
+    "custom_domain": true
+  },
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*",
+      "/ws"
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tslap-friends",
+      "database_id": "0b7baae9-0537-4a6d-a154-ba23d048aa73",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PRESENCE",
+        "class_name": "PresenceHub"
+      },
+      {
+        "name": "CALL_ROOM",
+        "class_name": "CallRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-friends",
+      "new_classes": [
+        "PresenceHub",
+        "CallRoom"
+      ]
+    }
+  ],
+  "account_id": "9ee3d7479a3c359681e3fab2c8cb22c0"
+}

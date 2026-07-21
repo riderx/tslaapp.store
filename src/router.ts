@@ -5,33 +5,17 @@ import CarSound from './views/CarSound.vue'
 import CarSoundV2 from './views/CarSoundV2.vue'
 import Results from './views/Results.vue'
 import Nav from './views/Nav.vue'
+import Friends from './views/Friends.vue'
 
 export default createRouter({
   history: createWebHistory(),
   routes: [
-    {
-      path: '/',
-      component: Home
-    },
-    {
-      path: '/speed-test',
-      component: SpeedTest
-    },
-    {
-      path: '/car-sound',
-      component: CarSound
-    },
-    {
-      path: '/car-sound-v2',
-      component: CarSoundV2
-    },
-    {
-      path: '/results',
-      component: Results
-    },
-    {
-      path: '/nav',
-      component: Nav
-    }
-  ]
+    { path: '/', component: Home },
+    { path: '/speed-test', component: SpeedTest },
+    { path: '/car-sound', component: CarSound },
+    { path: '/car-sound-v2', component: CarSoundV2 },
+    { path: '/results', component: Results },
+    { path: '/nav', component: Nav },
+    { path: '/friends', component: Friends },
+  ],
 })
