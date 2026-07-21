@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref, onUnmounted, computed } from 'vue'
+import { ref, shallowRef, onUnmounted, computed } from 'vue'
 import { Pause, Play, Volume2, Settings, X, ZapIcon } from 'lucide-vue-next'
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
 
 // Vehicle and engine state
-const vehicle = ref<Vehicle | null>(null)
+const vehicle = shallowRef<Vehicle | null>(null)
 const isPlaying = ref(false)
 const showSettings = ref(false)
 
@@ -15,6 +15,9 @@ const rpm = ref(800)
 const throttle = ref(0)
 const gear = ref(0)
 const volume = ref(50)
+const manualThrottle = ref(0)
+const errorMessage = ref('')
+const isHoldingThrottle = ref(false)
 
 // Sensor data
 const speed = ref(0)
@@ -26,8 +29,8 @@ const hasGeolocationPermission = ref(false)
 const maxRpm = ref(8000)
 const minRpm = ref(800)
 const sensitivity = ref(50)
-const useGps = ref(true)
-const useAccelerometer = ref(true)
+const useGps = ref(false)
+const useAccelerometer = ref(false)
 const selectedConfig = ref<keyof typeof configurations>('bac_mono')
 
 // Test acceleration
@@ -42,24 +45,28 @@ let lastTime = 0
 // Toggle play/pause
 const togglePlay = async () => {
   try {
+    errorMessage.value = ''
+    if (isPlaying.value) {
+      stopEngine()
+      isPlaying.value = false
+      return
+    }
+
     if (!vehicle.value) {
       await initVehicle()
     }
     
     if (!vehicle.value) {
-      console.error('Failed to initialize vehicle')
+      errorMessage.value = 'Failed to start engine. Check audio files and try again.'
       return
     }
     
-    if (isPlaying.value) {
-      stopEngine()
-    } else {
-      startEngine()
-    }
-    
-    isPlaying.value = !isPlaying.value
+    isPlaying.value = true
+    startEngine()
   } catch (error) {
     console.error('Error toggling engine:', error)
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to start engine'
+    isPlaying.value = false
   }
 }
 
@@ -67,6 +74,10 @@ const togglePlay = async () => {
 const initVehicle = async () => {
   try {
     console.log('Initializing vehicle with configuration:', selectedConfig.value)
+
+    if (vehicle.value) {
+      vehicle.value.audio.dispose()
+    }
     
     vehicle.value = new Vehicle()
     const config = configurations[selectedConfig.value] as EngineConfiguration
@@ -75,7 +86,8 @@ const initVehicle = async () => {
     
     // Update settings from configuration
     maxRpm.value = config.engine.limiter || 8000
-    minRpm.value = config.engine.idle || 800
+    minRpm.value = config.engine.idle || 1000
+    rpm.value = vehicle.value.engine.rpm
     
     // Set initial volume
     updateVolume()
@@ -83,14 +95,22 @@ const initVehicle = async () => {
     console.log('Vehicle initialized successfully')
   } catch (error) {
     console.error('Failed to initialize vehicle:', error)
+    vehicle.value = null
+    throw error
   }
 }
 
 // Start engine and sensors
 const startEngine = () => {
   if (!vehicle.value) return
+
+  // Resume audio after user gesture
+  void vehicle.value.audio.ctx?.resume()
+  updateVolume()
   
   startSensors()
+  window.addEventListener('keydown', handleKeyDown)
+  window.addEventListener('keyup', handleKeyUp)
   startUpdateLoop()
 }
 
@@ -100,12 +120,18 @@ const stopEngine = () => {
     cancelAnimationFrame(animationId)
     animationId = null
   }
+  lastTime = 0
+  isHoldingThrottle.value = false
+  manualThrottle.value = 0
   
   if (vehicle.value) {
     vehicle.value.engine.throttle = 0
+    vehicle.value.audio.muteAll()
   }
   
   window.removeEventListener('devicemotion', handleMotion)
+  window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('keyup', handleKeyUp)
   
   if (watchId) {
     navigator.geolocation.clearWatch(watchId)
@@ -139,35 +165,42 @@ const startUpdateLoop = () => {
   animationId = requestAnimationFrame(update)
 }
 
-// Update throttle based on sensor data and test acceleration
+// Update throttle based on sensors, manual input, and test acceleration
 const updateThrottle = () => {
   if (!vehicle.value) return
   
-  let newThrottle = 0
+  let newThrottle = manualThrottle.value
   
   // Factor in speed if GPS is enabled
   if (useGps.value && hasGeolocationPermission.value) {
     const speedFactor = Math.min(speed.value / 100, 1) // Map 0-100 km/h to 0-1
-    newThrottle += speedFactor * 0.7
+    newThrottle = Math.max(newThrottle, speedFactor * 0.7)
   }
   
-  // Factor in acceleration if accelerometer is enabled
+  // Factor in forward acceleration if accelerometer is enabled (ignore gravity noise)
   if (useAccelerometer.value && hasAccelerometerPermission.value) {
-    const accelFactor = Math.max((acceleration.value + 5) / 10, 0) // Map -5 to 5 range to 0-1
-    const accelInfluence = (sensitivity.value / 100) * 0.5
-    newThrottle += accelFactor * accelInfluence
+    const forward = Math.max(acceleration.value, 0) // only positive accel
+    const accelFactor = Math.min(forward / 4, 1) // 0-4 m/s^2 -> 0-1
+    if (accelFactor > 0.05) {
+      const accelInfluence = sensitivity.value / 100
+      newThrottle = Math.max(newThrottle, accelFactor * accelInfluence)
+    }
   }
   
   // Apply test acceleration if active
   if (isAccelerating.value) {
     const testAccelFactor = testAccelerationValue.value / 100
-    newThrottle += testAccelFactor * 0.8
+    newThrottle = Math.max(newThrottle, testAccelFactor)
+  }
+
+  if (isHoldingThrottle.value) {
+    newThrottle = Math.max(newThrottle, 1)
   }
   
   // Smooth throttle changes
-  const targetThrottle = Math.min(newThrottle, 1)
+  const targetThrottle = Math.min(Math.max(newThrottle, 0), 1)
   const currentThrottle = vehicle.value.engine.throttle
-  const smoothing = 0.1
+  const smoothing = 0.15
   
   vehicle.value.engine.throttle = currentThrottle + (targetThrottle - currentThrottle) * smoothing
 }
@@ -190,8 +223,30 @@ const handleTestAccelerationChange = (e: Event) => {
 
 // Update volume
 const updateVolume = () => {
-  if (vehicle.value?.audio?.volume) {
-    vehicle.value.audio.volume.gain.value = volume.value / 100
+  vehicle.value?.audio.setMasterVolume(volume.value / 100)
+}
+
+const handleThrottleChange = (e: Event) => {
+  manualThrottle.value = parseInt((e.target as HTMLInputElement).value) / 100
+}
+
+const handleKeyDown = (e: KeyboardEvent) => {
+  if (e.code === 'Space') {
+    e.preventDefault()
+    isHoldingThrottle.value = true
+  } else if (e.code === 'ArrowUp') {
+    e.preventDefault()
+    shiftUp()
+  } else if (e.code === 'ArrowDown') {
+    e.preventDefault()
+    shiftDown()
+  }
+}
+
+const handleKeyUp = (e: KeyboardEvent) => {
+  if (e.code === 'Space') {
+    e.preventDefault()
+    isHoldingThrottle.value = false
   }
 }
 
@@ -424,6 +479,30 @@ const toggleSettings = () => {
           <component :is="isPlaying ? Pause : Play" class="play-icon" />
           <span>{{ isPlaying ? 'Stop' : 'Start' }} Engine</span>
         </button>
+
+        <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
+
+        <div class="throttle-control" v-if="isPlaying">
+          <label class="throttle-label">Throttle {{ Math.round(manualThrottle * 100) }}%</label>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            :value="manualThrottle * 100"
+            @input="handleThrottleChange"
+            class="throttle-slider"
+          />
+          <button
+            class="rev-button"
+            :class="{ active: isHoldingThrottle || isAccelerating }"
+            @pointerdown.prevent="isHoldingThrottle = true"
+            @pointerup.prevent="isHoldingThrottle = false"
+            @pointerleave.prevent="isHoldingThrottle = false"
+            @pointercancel.prevent="isHoldingThrottle = false"
+          >
+            Hold to Rev (or Space)
+          </button>
+        </div>
         
         <div class="gear-controls" v-if="isPlaying">
           <button class="gear-button" @click="shiftDown" :disabled="gear <= 0">
@@ -736,6 +815,65 @@ const toggleSettings = () => {
 
 .play-button:hover {
   background-color: #c91c21;
+}
+
+.error-message {
+  margin-top: 0.75rem;
+  color: #e82127;
+  font-size: 0.875rem;
+  text-align: center;
+}
+
+.throttle-control {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.throttle-label {
+  font-size: 0.875rem;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.throttle-slider {
+  width: 100%;
+  height: 0.25rem;
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 0.125rem;
+  outline: none;
+}
+
+.throttle-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background-color: #f39c12;
+  cursor: pointer;
+}
+
+.rev-button {
+  width: 100%;
+  padding: 1rem;
+  background-color: rgba(243, 156, 18, 0.15);
+  color: white;
+  border: 1px solid rgba(243, 156, 18, 0.5);
+  border-radius: 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.rev-button.active,
+.rev-button:active {
+  background-color: rgba(243, 156, 18, 0.45);
+  border-color: #f39c18;
 }
 
 .play-icon {

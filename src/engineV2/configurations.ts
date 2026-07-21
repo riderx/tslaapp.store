@@ -137,10 +137,12 @@ export const procar: EngineConfiguration = {
         on_high: {
             source: 'audio/procar/on_midhigh {eed64b99-c102-43cf-834e-4e4cafa68fdc}.wav',
             rpm: 8000,
+            volume: 1.0,
         },
         on_low: {
             source: 'audio/procar/on_low {0477930f-2954-45ee-8ac4-db4867fe1749}.wav',
             rpm: 3200,
+            volume: 1.0,
         },
         off_high: {
             source: 'audio/procar/off_midhigh {092a60f7-c729-4d2c-979e-2e766ba42c6c}.wav',

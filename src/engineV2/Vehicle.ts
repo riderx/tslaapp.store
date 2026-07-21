@@ -7,7 +7,7 @@ export class Vehicle {
 
     audio = new AudioManager();
 
-    engine = new Engine();;
+    engine = new Engine();
     drivetrain = new Drivetrain();
     
     mass = 500;

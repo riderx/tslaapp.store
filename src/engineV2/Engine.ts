@@ -40,7 +40,6 @@ export class Engine {
     }
     
     init(config?: Partial<Engine>) {
-        console.log(this.limiter);
         if (config) Object.assign(this, config);
         this.omega_max = (2 * Math.PI * this.limiter) / 60;
 
@@ -53,7 +52,8 @@ export class Engine {
         this.prevTheta = 0;
         this.prevOmega = 0;
         this.dTheta = 0;
-        this.rpm = 0;
+        this.rpm = this.idle;
+        this.omega = (this.idle * 2 * Math.PI) / 60;
     }
     
     integrate(load_inertia: number = 0, time: number, dt: number) {
@@ -73,11 +73,12 @@ export class Engine {
             this.throttle = 0.0;
         }
 
-        /* Idle adjustment */
+        /* Idle governor: always prevent stalling below idle */
         let idleTorque = 0;
-        if (this.throttle < 0.1 && this.rpm < this.idle * 1.5) {
-            const rIdle = ratio(this.rpm, this.idle * 0.9, this.idle);
-            idleTorque = (1-rIdle) * this.engine_braking * 10;
+        if (this.rpm < this.idle * 1.2) {
+            const rIdle = ratio(this.rpm, this.idle * 0.85, this.idle);
+            const idleThrottle = Math.max(0, 1 - this.throttle);
+            idleTorque = (1 - rIdle) * this.engine_braking * 12 * idleThrottle;
         }
         
         /* Torque */
@@ -91,11 +92,10 @@ export class Engine {
         
         this.prevTheta = this.theta;
         this.omega += dAlpha * dt;
+        if (this.omega < 0) this.omega = 0;
         this.theta += this.omega * dt;
         this.dTheta = this.omega * dt;
-
-        // this.omega = clamp(this.omega, 0, this.omega_max);
-        this.rpm = (60 * this.omega) / 2 * Math.PI;
+        this.rpm = (60 * this.omega) / (2 * Math.PI);
 
     }
 
@@ -104,7 +104,8 @@ export class Engine {
 
         const dTheta = (this.theta - this.prevTheta) / h;
 
-        this.omega = dTheta;
+        this.omega = Math.max(0, dTheta);
+        this.rpm = (60 * this.omega) / (2 * Math.PI);
     }
 
     solvePos(drivetrain: Drivetrain, h: number) {
@@ -117,14 +118,9 @@ export class Engine {
     }
 
     solveVel(drivetrain: Drivetrain, h: number) {
-        // let dv = 0;
-        // dv -= drivetrain.omega;
-        // dv += this.omega;
-        // dv *= Math.min(1.0, 0.1 * h);
+        if (drivetrain.gear === 0)
+            return;
 
-        // this.omega += this.getCorrection(dv, h, 0.0);
-
-        // const damping = 1 + 1 * Math.pow(drivetrain.gear, 2);
         let damping = 12;
         if (drivetrain.gear > 3)
             damping = 9;
@@ -153,7 +149,7 @@ export class Engine {
                 samples[key].audio.detune.value = this.getRPMPitch(samples[key].rpm, rpmPitchFactor);
             }
 
-            samples[key].gain.gain.value = gain * samples[key].volume;
+            samples[key].gain.gain.value = gain * (samples[key].volume ?? 1);
         };
 
         applySample('on_low', on * low);
@@ -165,10 +161,10 @@ export class Engine {
         /* TRANSMISSION */
         if (samples['tranny_on'] && samples['tranny_off']) {
             samples['tranny_on'].audio.detune.value = this.rpm * gearRatio * 0.05 - 100;
-            samples['tranny_on'].gain.gain.value = gearRatio > 0 ? on * samples['tranny_on'].volume : 0;
+            samples['tranny_on'].gain.gain.value = gearRatio > 0 ? on * (samples['tranny_on'].volume ?? 1) : 0;
             
             samples['tranny_off'].audio.detune.value = this.rpm * gearRatio * 0.035 - 800;
-            samples['tranny_off'].gain.gain.value = gearRatio > 0 ? off * samples['tranny_off'].volume : 0;
+            samples['tranny_off'].gain.gain.value = gearRatio > 0 ? off * (samples['tranny_off'].volume ?? 1) : 0;
         }
     }
 

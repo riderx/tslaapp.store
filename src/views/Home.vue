@@ -18,14 +18,14 @@ const apps = [
     name: "Car Sound",
     icon: Volume2,
     available: true,
-    route: '/car-sound'
+    route: '/car-sound-v2'
   },
   {
-    id: "carsoundv2",
-    name: "Car Sound V2",
+    id: "carsoundv1",
+    name: "Car Sound (Legacy)",
     icon: Volume2,
     available: true,
-    route: '/car-sound-v2'
+    route: '/car-sound'
   },
   {
     id: "stats",
