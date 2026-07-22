@@ -158,6 +158,8 @@ async function routesApi(
     headers: {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': key,
+      Referer: 'https://tslap.store/',
+      Origin: 'https://tslap.store',
       'X-Goog-FieldMask':
         'routes.duration,routes.staticDuration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals,routes.legs.steps.distanceMeters,routes.legs.steps.staticDuration,routes.legs.steps.navigationInstruction,routes.legs.steps.polyline,routes.legs.steps.startLocation',
     },

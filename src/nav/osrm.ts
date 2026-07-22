@@ -1,4 +1,5 @@
 import type { LatLng, NavStep, RouteResult, TrafficSegment } from './types'
+import { fetchGoogleRoutes } from './googleRoute'
 
 const OSRM = 'https://router.project-osrm.org/route/v1/driving'
 
@@ -117,8 +118,12 @@ async function fetchOsrmRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
 /** Prefer Google live traffic ETA/colors; fall back to OSRM. */
 export async function fetchRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
   try {
-    return await fetchGoogleTrafficRoute(from, to)
+    return await fetchGoogleRoutes(from, to)
   } catch {
-    return await fetchOsrmRoute(from, to)
+    try {
+      return await fetchGoogleTrafficRoute(from, to)
+    } catch {
+      return await fetchOsrmRoute(from, to)
+    }
   }
 }
