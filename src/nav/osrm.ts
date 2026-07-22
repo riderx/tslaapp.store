@@ -1,4 +1,4 @@
-import type { LatLng, NavStep, RouteResult } from './types'
+import type { LatLng, NavStep, RouteResult, TrafficSegment } from './types'
 
 const OSRM = 'https://router.project-osrm.org/route/v1/driving'
 
@@ -55,10 +55,28 @@ function instructionFor(type: string, modifier: string | undefined, name: string
   }
 }
 
-export async function fetchRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
+async function fetchGoogleTrafficRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
+  const res = await fetch('/api/nav/route', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to }),
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`)
+  return {
+    distance: data.distance,
+    duration: data.duration,
+    durationStatic: data.durationStatic,
+    geometry: data.geometry,
+    steps: data.steps as NavStep[],
+    traffic: data.traffic as TrafficSegment[] | undefined,
+    hasTraffic: true,
+  }
+}
+
+async function fetchOsrmRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
   const path = `${from.lng},${from.lat};${to.lng},${to.lat}`
-  const url =
-    `${OSRM}/${path}?overview=full&geometries=geojson&steps=true&annotations=false`
+  const url = `${OSRM}/${path}?overview=full&geometries=geojson&steps=true&annotations=false`
 
   const res = await fetch(url)
   if (!res.ok) throw new Error('Routing failed')
@@ -92,5 +110,15 @@ export async function fetchRoute(from: LatLng, to: LatLng): Promise<RouteResult>
     duration: route.duration,
     geometry,
     steps,
+    hasTraffic: false,
+  }
+}
+
+/** Prefer Google live traffic ETA/colors; fall back to OSRM. */
+export async function fetchRoute(from: LatLng, to: LatLng): Promise<RouteResult> {
+  try {
+    return await fetchGoogleTrafficRoute(from, to)
+  } catch {
+    return await fetchOsrmRoute(from, to)
   }
 }

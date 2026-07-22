@@ -22,7 +22,13 @@ import { clearHistory, loadHistory, pushHistory } from '../nav/history'
 import { fetchRoute } from '../nav/osrm'
 import { formatDistance, formatDuration, formatEta } from '../nav/format'
 import { computeProgress, offsetAlongBearing, projectOnRoute } from '../nav/geo'
-import { bboxAround, fetchRadarsInBbox, type RadarPoint, type RadarSection } from '../nav/radars'
+import {
+  bboxAround,
+  fetchRadarsInBbox,
+  findApproachingRadar,
+  type RadarPoint,
+  type RadarSection,
+} from '../nav/radars'
 import type { LatLng, PlaceResult, RouteResult } from '../nav/types'
 
 const router = useRouter()
@@ -78,6 +84,7 @@ let rerouteBusy = false
 let radarAbort: AbortController | null = null
 let radarTimer: number | null = null
 let radarsLoaded = false
+const radarPoints = ref<RadarPoint[]>([])
 let lastRouteSplitAt = 0
 let lastSplitSeg = -1
 let camRaf = 0
@@ -118,6 +125,22 @@ const listRows = computed(() => (showHistory.value ? history.value : results.val
 const progress = computed(() => {
   if (!position.value || !route.value || phase.value !== 'navigating') return null
   return computeProgress(position.value, route.value, heading.value)
+})
+
+const nearbyRadar = computed(() => {
+  if (!position.value || !radarPoints.value.length) return null
+  const course = progress.value?.bearing ?? heading.value ?? 0
+  return findApproachingRadar(position.value, course, radarPoints.value, 450)
+})
+
+const etaLabel = computed(() => {
+  const r = route.value
+  if (!r) return ''
+  if (r.hasTraffic && r.durationStatic && r.duration > r.durationStatic + 30) {
+    const delayMin = Math.round((r.duration - r.durationStatic) / 60)
+    return delayMin > 0 ? `incl. +${delayMin} min traffic` : 'live traffic'
+  }
+  return r.hasTraffic ? 'live traffic' : ''
 })
 
 const maneuverIcon = computed(() => {
@@ -190,21 +213,42 @@ function stopCameraLoop() {
 
 function emptyLine() {
   return {
-    type: 'Feature' as const,
-    properties: {},
-    geometry: { type: 'LineString' as const, coordinates: [] as [number, number][] },
+    type: 'FeatureCollection' as const,
+    features: [] as any[],
   }
 }
 
-function lineFeature(coords: LatLng[]) {
+function lineFeature(coords: LatLng[], speed = 'NORMAL') {
   return {
-    type: 'Feature' as const,
-    properties: {},
-    geometry: {
-      type: 'LineString' as const,
-      coordinates: coords.map((c) => [c.lng, c.lat] as [number, number]),
-    },
+    type: 'FeatureCollection' as const,
+    features: [
+      {
+        type: 'Feature' as const,
+        properties: { speed },
+        geometry: {
+          type: 'LineString' as const,
+          coordinates: coords.map((c) => [c.lng, c.lat] as [number, number]),
+        },
+      },
+    ],
   }
+}
+
+function trafficFeatureCollection(coords: LatLng[]) {
+  const segs = route.value?.traffic
+  if (segs?.length) {
+    return {
+      type: 'FeatureCollection' as const,
+      features: segs
+        .filter((s) => s.coordinates.length >= 2)
+        .map((s) => ({
+          type: 'Feature' as const,
+          properties: { speed: s.speed },
+          geometry: { type: 'LineString' as const, coordinates: s.coordinates },
+        })),
+    }
+  }
+  return lineFeature(coords, 'NORMAL')
 }
 
 function onMapLoad() {
@@ -236,9 +280,22 @@ function onMapLoad() {
     id: 'route-remaining',
     type: 'line',
     source: 'route-remaining',
-    paint: { 'line-color': '#1a73e8', 'line-width': 7 },
+    paint: {
+      'line-color': [
+        'match',
+        ['get', 'speed'],
+        'SLOW',
+        '#f9a825',
+        'TRAFFIC_JAM',
+        '#d93025',
+        '#1a73e8',
+      ],
+      'line-width': 7,
+    },
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   })
+  map.moveLayer('route-traveled-casing')
+  map.moveLayer('route-traveled')
 
   map.addSource('radars', {
     type: 'geojson',
@@ -401,6 +458,7 @@ async function refreshRadars() {
     const sec = map.getSource('radar-sections') as GeoJSONSource | undefined
     src?.setData(radarsToGeoJSON(data.points))
     sec?.setData(sectionsToGeoJSON(data.sections))
+    radarPoints.value = data.points
     radarsLoaded = true
   } catch (e: any) {
     if (e?.name === 'AbortError') return
@@ -488,16 +546,14 @@ function setRouteLine(coords: LatLng[], splitAt?: LatLng) {
     remainingSrc.setData(emptyLine())
     return
   }
+  remainingSrc.setData(trafficFeatureCollection(coords))
   if (!splitAt) {
     traveledSrc.setData(emptyLine())
-    remainingSrc.setData(lineFeature(coords))
     return
   }
   const proj = projectOnRoute(splitAt, coords)
   const traveled = [...coords.slice(0, proj.segmentIndex + 1), proj.nearest]
-  const remaining = [proj.nearest, ...coords.slice(proj.segmentIndex + 1)]
-  traveledSrc.setData(lineFeature(traveled))
-  remainingSrc.setData(lineFeature(remaining))
+  traveledSrc.setData(lineFeature(traveled, 'NORMAL'))
 }
 
 function puckHtml() {
@@ -959,6 +1015,7 @@ onUnmounted(() => {
         <div class="preview-eta">{{ formatDuration(route.duration) }}</div>
         <div class="preview-sub">
           {{ formatDistance(route.distance) }} · arrive {{ formatEta(route.duration) }}
+          <span v-if="etaLabel" class="traffic-tag"> · {{ etaLabel }}</span>
         </div>
         <div class="preview-dest">{{ destination.name }}</div>
       </div>
@@ -986,6 +1043,19 @@ onUnmounted(() => {
         <div class="stat-main">{{ formatDuration(progress.durationRemaining) }}</div>
         <div class="stat-sub">
           {{ formatDistance(progress.distanceRemaining) }} · {{ formatEta(progress.durationRemaining) }}
+          <span v-if="route?.hasTraffic" class="traffic-tag"> · traffic</span>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="nearbyRadar" class="radar-chip">
+      <div v-if="nearbyRadar.limit != null" class="radar-chip-limit">{{ nearbyRadar.limit }}</div>
+      <div v-else class="radar-chip-limit radar-chip-limit-unk">?</div>
+      <div class="radar-chip-text">
+        <div class="radar-chip-title">Speed camera</div>
+        <div class="radar-chip-sub">
+          {{ formatDistance(nearbyRadar.distanceM) }}
+          <template v-if="nearbyRadar.limit != null"> · limit {{ nearbyRadar.limit }} km/h</template>
         </div>
       </div>
     </div>
@@ -993,6 +1063,58 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.traffic-tag {
+  color: #e37400;
+  font-weight: 600;
+}
+
+.radar-chip {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 6.75rem;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 14px;
+  background: rgba(32, 33, 36, 0.92);
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.radar-chip-limit {
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 4px solid #e53935;
+  background: #fff;
+  color: #202124;
+  display: grid;
+  place-items: center;
+  font-size: 1.25rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.radar-chip-limit-unk {
+  font-size: 1.1rem;
+}
+
+.radar-chip-title {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.radar-chip-sub {
+  margin-top: 0.15rem;
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
 .nav-root {
   --gmaps-blue: #1a73e8;
   --gmaps-green: #0f9d58;

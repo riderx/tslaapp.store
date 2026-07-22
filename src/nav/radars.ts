@@ -1,4 +1,5 @@
 import type { LatLng } from "./types"
+import { bearing, haversine } from "./geo"
 
 export type RadarPoint = {
   id: string
@@ -254,4 +255,41 @@ export function bboxAround(center: LatLng, radiusKm = 12) {
     north: center.lat + dLat,
     east: center.lng + dLng,
   }
+}
+
+
+
+export function parseMaxspeed(raw?: string): number | undefined {
+  if (!raw) return undefined
+  const m = String(raw).match(/(\d+(?:\.\d+)?)/)
+  if (!m) return undefined
+  const n = Number(m[1])
+  if (!Number.isFinite(n)) return undefined
+  if (/mph/i.test(raw)) return Math.round(n * 1.60934)
+  return Math.round(n)
+}
+
+/** Nearest camera ahead (or very close beside) with optional posted limit. */
+export function findApproachingRadar(
+  pos: LatLng,
+  courseDeg: number,
+  points: RadarPoint[],
+  radiusM = 450,
+): { point: RadarPoint; distanceM: number; limit?: number } | null {
+  let best: { point: RadarPoint; distanceM: number; score: number; limit?: number } | null = null
+  for (const p of points) {
+    const d = haversine(pos, { lat: p.lat, lng: p.lng })
+    if (d > radiusM) continue
+    const br = bearing(pos, { lat: p.lat, lng: p.lng })
+    let delta = Math.abs(br - courseDeg) % 360
+    if (delta > 180) delta = 360 - delta
+    const ahead = delta <= 100
+    if (!ahead && d > 140) continue
+    const score = d + (ahead ? 0 : 90)
+    if (!best || score < best.score) {
+      best = { point: p, distanceM: d, score, limit: parseMaxspeed(p.maxspeed) }
+    }
+  }
+  if (!best) return null
+  return { point: best.point, distanceM: best.distanceM, limit: best.limit }
 }

@@ -5,6 +5,8 @@ export interface Env {
   ASSETS: Fetcher
   CALLS_APP_ID: string
   CALLS_APP_SECRET: string
+  /** Server-side Google key for traffic-aware nav routing */
+  GOOGLE_MAPS_API_KEY?: string
 }
 
 export type UserRow = {

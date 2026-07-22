@@ -3,6 +3,7 @@ import { bearer, cors, friendCode, hashToken, id, json, requireUser } from './au
 import { closeTracks, createSession, newTracks, renegotiate, sfuConfigured } from './sfu'
 import { getUserLocation, notifyUser, PresenceHub } from './presence'
 import { callRoomStub, CallRoom } from './call-room'
+import { computeNavRoute } from './nav-route'
 
 export { PresenceHub, CallRoom }
 
@@ -51,6 +52,27 @@ async function handleWs(request: Request, env: Env, url: URL): Promise<Response>
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
   const path = url.pathname.replace(/\/$/, '') || '/'
+
+  if (path === '/api/nav/route' && request.method === 'POST') {
+    const key = env.GOOGLE_MAPS_API_KEY
+    if (!key) return json({ error: 'GOOGLE_MAPS_API_KEY not configured' }, 503)
+    const body = await request.json<{ from?: { lat: number; lng: number }; to?: { lat: number; lng: number } }>()
+    if (
+      body?.from?.lat == null ||
+      body?.from?.lng == null ||
+      body?.to?.lat == null ||
+      body?.to?.lng == null
+    ) {
+      return json({ error: 'from and to required' }, 400)
+    }
+    try {
+      const route = await computeNavRoute(key, body.from, body.to)
+      return json(route)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Routing failed'
+      return json({ error: message }, 502)
+    }
+  }
 
   if (path === '/api/health' && request.method === 'GET') {
     return json({ ok: true, sfu: sfuConfigured(env) })

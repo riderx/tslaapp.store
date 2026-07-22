@@ -47,9 +47,23 @@ export type NavStep = {
   geometry: LatLng[]
 }
 
+export type TrafficSpeed = 'NORMAL' | 'SLOW' | 'TRAFFIC_JAM'
+
+export type TrafficSegment = {
+  speed: TrafficSpeed
+  /** [lng, lat][] */
+  coordinates: [number, number][]
+}
+
 export type RouteResult = {
   distance: number
+  /** Preferred ETA seconds (traffic-aware when available) */
   duration: number
+  /** Free-flow / static duration when provider sent it */
+  durationStatic?: number
   geometry: LatLng[]
   steps: NavStep[]
+  /** Live traffic coloring along the route */
+  traffic?: TrafficSegment[]
+  hasTraffic?: boolean
 }
