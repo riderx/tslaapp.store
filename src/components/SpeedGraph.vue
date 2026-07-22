@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useSpeedStore } from '../stores/speedStore'
 
 const speedStore = useSpeedStore()
@@ -14,6 +14,11 @@ onMounted(() => {
   window.addEventListener('resize', resizeCanvas)
   
   drawGraph()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', resizeCanvas)
+  ctx.value = null
 })
 
 // Redraw when unit changes

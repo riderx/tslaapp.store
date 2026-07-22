@@ -12,6 +12,10 @@ interface TestResult {
   speedLog: Array<{time: number, speed: number}>
 }
 
+const MAX_SPEED_LOG_POINTS = 600
+const MAX_HISTORY_ITEMS = 50
+const MIN_LOG_INTERVAL_MS = 100
+
 export const useSpeedStore = defineStore('speed', () => {
   const router = useRouter()
   
@@ -28,6 +32,8 @@ export const useSpeedStore = defineStore('speed', () => {
   const permissionDenied = ref(false)
   const testHistory = ref<TestResult[]>([])
   const totalDistance = ref(0)
+  let lastLogTime = 0
+  let lastPosition: GeolocationPosition | null = null
   
   // Test types and targets
   const selectedTestType = ref<'acceleration' | 'distance'>('acceleration')
@@ -70,22 +76,66 @@ export const useSpeedStore = defineStore('speed', () => {
     const time = (endTime.value - startTime.value) / 1000
     return time.toFixed(2)
   })
+
+  function downsampleLog(log: Array<{time: number, speed: number}>, maxPoints: number) {
+    if (log.length <= maxPoints) return log
+    const step = log.length / maxPoints
+    const sampled: Array<{time: number, speed: number}> = []
+    for (let i = 0; i < maxPoints - 1; i++) {
+      sampled.push(log[Math.floor(i * step)])
+    }
+    sampled.push(log[log.length - 1])
+    return sampled
+  }
   
   // Load history from localStorage
   const loadHistory = () => {
-    const savedHistory = localStorage.getItem('testHistory')
-    if (savedHistory) {
-      testHistory.value = JSON.parse(savedHistory)
+    try {
+      const savedHistory = localStorage.getItem('testHistory')
+      if (savedHistory) {
+        const parsed = JSON.parse(savedHistory) as TestResult[]
+        testHistory.value = parsed.slice(0, MAX_HISTORY_ITEMS).map((item) => ({
+          ...item,
+          speedLog: downsampleLog(item.speedLog || [], 120)
+        }))
+      }
+    } catch {
+      testHistory.value = []
+      localStorage.removeItem('testHistory')
     }
   }
   
   // Save history to localStorage
   const saveHistory = () => {
-    localStorage.setItem('testHistory', JSON.stringify(testHistory.value))
+    try {
+      const trimmed = testHistory.value.slice(0, MAX_HISTORY_ITEMS).map((item) => ({
+        ...item,
+        speedLog: downsampleLog(item.speedLog || [], 120)
+      }))
+      localStorage.setItem('testHistory', JSON.stringify(trimmed))
+    } catch {
+      // Quota exceeded — drop oldest entries and retry once
+      testHistory.value = testHistory.value.slice(0, 10).map((item) => ({
+        ...item,
+        speedLog: downsampleLog(item.speedLog || [], 60)
+      }))
+      try {
+        localStorage.setItem('testHistory', JSON.stringify(testHistory.value))
+      } catch {
+        localStorage.removeItem('testHistory')
+      }
+    }
   }
   
   // Initialize history on store creation
   loadHistory()
+
+  function clearWatch() {
+    if (watchId.value !== null) {
+      navigator.geolocation.clearWatch(watchId.value)
+      watchId.value = null
+    }
+  }
   
   function saveTestResult() {
     const result: TestResult = {
@@ -95,10 +145,13 @@ export const useSpeedStore = defineStore('speed', () => {
       targetSpeed: targetSpeedInCurrentUnit.value,
       isMetric: isMetric.value,
       date: new Date().toISOString(),
-      speedLog: [...speedLog.value]
+      speedLog: downsampleLog(speedLog.value, 120)
     }
     
     testHistory.value.unshift(result)
+    if (testHistory.value.length > MAX_HISTORY_ITEMS) {
+      testHistory.value = testHistory.value.slice(0, MAX_HISTORY_ITEMS)
+    }
     saveHistory()
   }
   
@@ -114,7 +167,7 @@ export const useSpeedStore = defineStore('speed', () => {
   
   function startTest() {
     if (!hasPermission.value) {
-      requestGeolocationPermission()
+      requestGeolocationPermission(true)
       return
     }
     
@@ -125,6 +178,8 @@ export const useSpeedStore = defineStore('speed', () => {
     resetTest()
     isRunning.value = true
     speedLog.value = []
+    lastLogTime = 0
+    lastPosition = null
     
     watchId.value = navigator.geolocation.watchPosition(
       handleGeolocationUpdate,
@@ -134,10 +189,7 @@ export const useSpeedStore = defineStore('speed', () => {
   }
   
   function resetTest() {
-    if (watchId.value !== null) {
-      navigator.geolocation.clearWatch(watchId.value)
-      watchId.value = null
-    }
+    clearWatch()
     
     isRunning.value = false
     currentSpeed.value = 0
@@ -146,6 +198,8 @@ export const useSpeedStore = defineStore('speed', () => {
     endTime.value = 0
     speedLog.value = []
     totalDistance.value = 0
+    lastLogTime = 0
+    lastPosition = null
   }
   
   function handleGeolocationUpdate(position: GeolocationPosition) {
@@ -175,27 +229,37 @@ export const useSpeedStore = defineStore('speed', () => {
       maxSpeed.value = speed
     }
     
-    // Calculate elapsed time and distance
-    const elapsedTime = (Date.now() - startTime.value) / 1000 // seconds
-    const distanceInMeters = speedInMps * elapsedTime
-    totalDistance.value = distanceInMeters
+    // Accumulate distance from position deltas when available
+    if (lastPosition) {
+      const dt = (position.timestamp - lastPosition.timestamp) / 1000
+      if (dt > 0 && dt < 5) {
+        totalDistance.value += speedInMps * dt
+      }
+    }
+    lastPosition = position
     
-    // Log the speed
-    speedLog.value.push({
-      time: Date.now() - startTime.value,
-      speed: speed
-    })
+    // Throttle speed log to avoid unbounded growth / OOM
+    const now = Date.now()
+    if (now - lastLogTime >= MIN_LOG_INTERVAL_MS) {
+      lastLogTime = now
+      speedLog.value.push({
+        time: now - startTime.value,
+        speed: speed
+      })
+      if (speedLog.value.length > MAX_SPEED_LOG_POINTS) {
+        speedLog.value.splice(0, speedLog.value.length - MAX_SPEED_LOG_POINTS)
+      }
+    }
     
     // Check if we've reached target
     const targetReached = selectedTestType.value === 'acceleration'
       ? speed >= targetSpeedInCurrentUnit.value
-      : distanceInMeters >= selectedTarget.value
+      : totalDistance.value >= selectedTarget.value
     
     if (targetReached && endTime.value === 0) {
       endTime.value = Date.now()
       isRunning.value = false
-      navigator.geolocation.clearWatch(watchId.value as number)
-      watchId.value = null
+      clearWatch()
       
       // Save the test result
       saveTestResult()
@@ -212,15 +276,15 @@ export const useSpeedStore = defineStore('speed', () => {
       hasPermission.value = false
     }
     isRunning.value = false
+    clearWatch()
   }
   
-  function requestGeolocationPermission() {
+  function requestGeolocationPermission(autoStart = false) {
     navigator.geolocation.getCurrentPosition(
       () => {
         hasPermission.value = true
         permissionDenied.value = false
-        // Only start the test if permission was explicitly granted
-        if (hasPermission.value && !permissionDenied.value) {
+        if (autoStart) {
           startTest()
         }
       },
@@ -235,8 +299,8 @@ export const useSpeedStore = defineStore('speed', () => {
     )
   }
   
-  // Check permission on store creation
-  requestGeolocationPermission()
+  // Check permission on store creation — do not auto-start a test
+  requestGeolocationPermission(false)
   
   return {
     currentSpeed,

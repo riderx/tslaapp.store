@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useSpeedStore } from '../stores/speedStore'
 
 const props = defineProps({
@@ -20,11 +20,14 @@ const radius = computed(() => Math.min(centerX.value, centerY.value) * 0.85)
 // Animation related
 const animatedSpeed = ref(0)
 const animationSpeed = 0.2 // Speed of animation (0-1)
+let rafId: number | null = null
+let mounted = false
 
 // Init canvas
 onMounted(() => {
   if (!canvasRef.value) return
   
+  mounted = true
   ctx.value = canvasRef.value.getContext('2d')
   resizeCanvas()
   window.addEventListener('resize', resizeCanvas)
@@ -35,6 +38,16 @@ onMounted(() => {
   } else {
     drawSpeedometer(speedStore.currentSpeed)
   }
+})
+
+onUnmounted(() => {
+  mounted = false
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId)
+    rafId = null
+  }
+  window.removeEventListener('resize', resizeCanvas)
+  ctx.value = null
 })
 
 // Animate speed changes
@@ -67,7 +80,10 @@ function resizeCanvas() {
 }
 
 function animationLoop() {
-  if (!ctx.value) return
+  if (!mounted || !ctx.value) {
+    rafId = null
+    return
+  }
   
   // Smoothly animate to target speed
   const targetSpeed = speedStore.currentSpeed
@@ -78,7 +94,7 @@ function animationLoop() {
     drawSpeedometer(animatedSpeed.value)
   }
   
-  requestAnimationFrame(animationLoop)
+  rafId = requestAnimationFrame(animationLoop)
 }
 
 function drawSpeedometer(speed: number) {
