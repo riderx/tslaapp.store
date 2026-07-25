@@ -68,6 +68,7 @@ const searching = ref(false)
 const error = ref('')
 const position = ref<LatLng | null>(null)
 const heading = ref<number | undefined>()
+const speedKmh = ref<number | null>(null)
 const destination = ref<PlaceResult | null>(null)
 const route = ref<RouteResult | null>(null)
 const loadingRoute = ref(false)
@@ -131,6 +132,16 @@ const nearbyRadar = computed(() => {
   if (!position.value || !radarPoints.value.length) return null
   const course = progress.value?.bearing ?? heading.value ?? 0
   return findApproachingRadar(position.value, course, radarPoints.value, 450)
+})
+
+/** Only warn when approaching a camera AND driving faster than its posted limit. */
+const radarSpeeding = computed(() => {
+  const radar = nearbyRadar.value
+  const speed = speedKmh.value
+  if (!radar || radar.limit == null || speed == null) return null
+  const current = Math.round(speed)
+  if (current <= radar.limit) return null
+  return { ...radar, speed: current }
 })
 
 const etaLabel = computed(() => {
@@ -602,6 +613,9 @@ function applyGpsFix(pos: GeolocationPosition) {
   if (pos.coords.heading != null && !Number.isNaN(pos.coords.heading) && pos.coords.heading >= 0) {
     heading.value = pos.coords.heading
   }
+  if (pos.coords.speed != null && !Number.isNaN(pos.coords.speed) && pos.coords.speed >= 0) {
+    speedKmh.value = pos.coords.speed * 3.6
+  }
 }
 
 function syncPositionOnMap() {
@@ -1048,15 +1062,15 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-if="nearbyRadar" class="radar-chip">
-      <div v-if="nearbyRadar.limit != null" class="radar-chip-limit">{{ nearbyRadar.limit }}</div>
-      <div v-else class="radar-chip-limit radar-chip-limit-unk">?</div>
-      <div class="radar-chip-text">
-        <div class="radar-chip-title">Speed camera</div>
-        <div class="radar-chip-sub">
-          {{ formatDistance(nearbyRadar.distanceM) }}
-          <template v-if="nearbyRadar.limit != null"> · limit {{ nearbyRadar.limit }} km/h</template>
-        </div>
+    <!-- Google-style: current speed + limit, top-right, only when over radar limit -->
+    <div v-if="radarSpeeding" class="speed-limit-hud" aria-live="polite">
+      <div class="speed-current">{{ radarSpeeding.speed }}</div>
+      <div class="speed-limit-sign">
+        <span class="speed-limit-value">{{ radarSpeeding.limit }}</span>
+      </div>
+      <div class="speed-limit-meta">
+        <span class="speed-limit-cam" aria-hidden="true"></span>
+        <span>{{ formatDistance(radarSpeeding.distanceM) }}</span>
       </div>
     </div>
   </div>
@@ -1068,51 +1082,75 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.radar-chip {
+.speed-limit-hud {
   position: absolute;
-  left: 0.75rem;
-  right: 0.75rem;
-  bottom: 6.75rem;
+  top: 1rem;
+  right: 1rem;
   z-index: 6;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.7rem 0.9rem;
-  border-radius: 14px;
-  background: rgba(32, 33, 36, 0.92);
-  color: #fff;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  gap: 0.3rem;
+  width: auto;
   pointer-events: none;
 }
 
-.radar-chip-limit {
-  flex: 0 0 auto;
-  width: 52px;
-  height: 52px;
+.speed-current {
+  min-width: 2.75rem;
+  height: 2.75rem;
+  padding: 0 0.35rem;
   border-radius: 50%;
-  border: 4px solid #e53935;
-  background: #fff;
-  color: #202124;
+  background: #d93025;
+  color: #fff;
   display: grid;
   place-items: center;
-  font-size: 1.25rem;
+  font-size: 1.05rem;
   font-weight: 800;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
-.radar-chip-limit-unk {
-  font-size: 1.1rem;
+.speed-limit-sign {
+  width: 2.35rem;
+  height: 2.35rem;
+  border-radius: 50%;
+  background: #fff;
+  border: 0.22rem solid #e53935;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  display: grid;
+  place-items: center;
 }
 
-.radar-chip-title {
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.radar-chip-sub {
-  margin-top: 0.15rem;
+.speed-limit-value {
+  color: #202124;
   font-size: 0.9rem;
-  opacity: 0.85;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-limit-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.18rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(32, 33, 36, 0.88);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+.speed-limit-cam {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  background: #fdd663;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  flex: 0 0 auto;
 }
 
 .nav-root {
