@@ -1011,7 +1011,7 @@ onUnmounted(() => {
     <!-- MANEUVER BANNER (Google-style) -->
     <div v-if="phase === 'navigating' && progress" class="maneuver">
       <div class="maneuver-inner">
-        <component :is="maneuverIcon" :size="56" class="maneuver-icon" stroke-width="2.4" />
+        <component :is="maneuverIcon" :size="44" class="maneuver-icon" stroke-width="2.4" />
         <div class="maneuver-copy">
           <div class="maneuver-dist">{{ formatDistance(progress.distanceToManeuver) }}</div>
           <div class="maneuver-instr">{{ progress.step.instruction }}</div>
@@ -1090,41 +1090,41 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.3rem;
+  gap: 0.35rem;
   width: auto;
   pointer-events: none;
 }
 
 .speed-current {
-  min-width: 2.75rem;
-  height: 2.75rem;
-  padding: 0 0.35rem;
+  min-width: 3.5rem;
+  height: 3.5rem;
+  padding: 0 0.4rem;
   border-radius: 50%;
   background: #d93025;
   color: #fff;
   display: grid;
   place-items: center;
-  font-size: 1.05rem;
+  font-size: 1.35rem;
   font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.32);
 }
 
 .speed-limit-sign {
-  width: 2.35rem;
-  height: 2.35rem;
+  width: 3rem;
+  height: 3rem;
   border-radius: 50%;
   background: #fff;
-  border: 0.22rem solid #e53935;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  border: 0.26rem solid #e53935;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   display: grid;
   place-items: center;
 }
 
 .speed-limit-value {
   color: #202124;
-  font-size: 0.9rem;
+  font-size: 1.15rem;
   font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -1133,20 +1133,20 @@ onUnmounted(() => {
 .speed-limit-meta {
   display: inline-flex;
   align-items: center;
-  gap: 0.28rem;
-  padding: 0.18rem 0.4rem;
+  gap: 0.3rem;
+  padding: 0.22rem 0.5rem;
   border-radius: 999px;
   background: rgba(32, 33, 36, 0.88);
   color: #fff;
-  font-size: 0.7rem;
+  font-size: 0.78rem;
   font-weight: 600;
   white-space: nowrap;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 .speed-limit-cam {
-  width: 0.55rem;
-  height: 0.55rem;
+  width: 0.6rem;
+  height: 0.6rem;
   border-radius: 2px;
   background: #fdd663;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
@@ -1320,18 +1320,19 @@ onUnmounted(() => {
   position: absolute;
   top: 1rem;
   left: 1rem;
-  right: 1rem;
+  right: auto;
   z-index: 5;
   pointer-events: none;
+  max-width: min(18.5rem, calc(100vw - 6.5rem));
 }
 
 .maneuver-inner {
   display: flex;
-  gap: 1rem;
+  gap: 0.75rem;
   align-items: center;
-  max-width: 36rem;
-  padding: 1rem 1.25rem;
-  border-radius: 1rem;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 0.9rem;
   background: #202124;
   color: #fff;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
@@ -1350,11 +1351,15 @@ onUnmounted(() => {
 }
 
 .maneuver-instr {
-  margin-top: 0.2rem;
-  font-size: 1.15rem;
-  font-weight: 400;
+  margin-top: 0.15rem;
+  font-size: 1.05rem;
+  font-weight: 500;
   opacity: 0.95;
-  line-height: 1.25;
+  line-height: 1.2;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 .preview-sheet,

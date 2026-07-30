@@ -1,59 +1,11 @@
 import type { LatLng, NavStep, RouteResult, TrafficSegment } from './types'
 import { fetchGoogleRoutes } from './googleRoute'
+import { instructionFor } from './instructions'
 
 const OSRM = 'https://router.project-osrm.org/route/v1/driving'
 
 function toLatLng(coord: [number, number]): LatLng {
   return { lng: coord[0], lat: coord[1] }
-}
-
-function instructionFor(type: string, modifier: string | undefined, name: string): string {
-  const road = name || 'the road'
-  const mod = modifier || 'straight'
-
-  switch (type) {
-    case 'depart':
-      return name ? `Head on ${name}` : 'Continue straight'
-    case 'arrive':
-      return 'You have arrived'
-    case 'roundabout':
-    case 'rotary':
-    case 'roundabout turn':
-      return name ? `Enter the roundabout toward ${name}` : 'Enter the roundabout'
-    case 'exit roundabout':
-    case 'exit rotary':
-      return name ? `Exit the roundabout onto ${name}` : 'Exit the roundabout'
-    case 'merge':
-      return name ? `Merge onto ${name}` : 'Merge'
-    case 'on ramp':
-      return name ? `Take the ramp onto ${name}` : 'Take the ramp'
-    case 'off ramp':
-      return name ? `Take the exit onto ${name}` : 'Take the exit'
-    case 'fork':
-      return mod.includes('left')
-        ? `Keep left${name ? ` onto ${name}` : ''}`
-        : `Keep right${name ? ` onto ${name}` : ''}`
-    case 'end of road':
-      return mod.includes('left')
-        ? `Turn left${name ? ` onto ${name}` : ''}`
-        : `Turn right${name ? ` onto ${name}` : ''}`
-    case 'continue':
-    case 'new name':
-      return name ? `Continue onto ${name}` : 'Continue straight'
-    case 'turn':
-    default:
-      if (mod === 'uturn') return name ? `Make a U-turn onto ${name}` : 'Make a U-turn'
-      if (mod === 'straight') return name ? `Continue onto ${name}` : 'Continue straight'
-      if (mod.includes('left')) {
-        const sharp = mod.includes('sharp') ? 'sharp ' : mod.includes('slight') ? 'slight ' : ''
-        return `Turn ${sharp}left${name ? ` onto ${name}` : ''}`
-      }
-      if (mod.includes('right')) {
-        const sharp = mod.includes('sharp') ? 'sharp ' : mod.includes('slight') ? 'slight ' : ''
-        return `Turn ${sharp}right${name ? ` onto ${name}` : ''}`
-      }
-      return name ? `Continue onto ${name}` : `Continue on ${road}`
-  }
 }
 
 async function fetchGoogleTrafficRoute(from: LatLng, to: LatLng): Promise<RouteResult> {

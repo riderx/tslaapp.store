@@ -1,4 +1,5 @@
 import type { LatLng, NavStep, RouteResult, TrafficSegment, TrafficSpeed } from './types'
+import { instructionFor, roadNameFromGoogleInstruction } from './instructions'
 
 function parseDurationSeconds(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -82,14 +83,14 @@ function normalizeStep(step: any, fallback: LatLng): NavStep {
   } else if (lower.includes('right')) {
     modifier = lower.includes('sharp') ? 'sharp right' : lower.includes('slight') ? 'slight right' : 'right'
   }
-  const instruction =
-    step.navigationInstruction?.instructions ||
-    (simpleType === 'arrive' ? 'You have arrived' : 'Continue')
+  const rawInstr = step.navigationInstruction?.instructions as string | undefined
+  const name = roadNameFromGoogleInstruction(rawInstr)
+  const instruction = instructionFor(simpleType, modifier, name)
   const coords = step.polyline?.encodedPolyline ? decodePolyline(step.polyline.encodedPolyline) : []
   return {
     distance: step.distanceMeters ?? 0,
     duration: parseDurationSeconds(step.staticDuration),
-    name: '',
+    name,
     instruction,
     type: simpleType,
     modifier,
