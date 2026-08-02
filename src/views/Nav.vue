@@ -15,10 +15,12 @@ import {
   Navigation,
   RotateCcw,
   Search,
+  Star,
   X,
 } from 'lucide-vue-next'
 import { searchPlaces } from '../nav/geocode'
 import { clearHistory, loadHistory, pushHistory } from '../nav/history'
+import { loadFavorites, toggleFavorite } from '../nav/favorites'
 import { fetchRoute } from '../nav/osrm'
 import { formatDistance, formatDuration, formatEta } from '../nav/format'
 import { computeProgress, offsetAlongBearing, projectOnRoute } from '../nav/geo'
@@ -64,6 +66,7 @@ const phase = ref<Phase>('search')
 const query = ref('')
 const results = ref<PlaceResult[]>([])
 const history = ref<PlaceResult[]>(loadHistory())
+const favorites = ref<PlaceResult[]>(loadFavorites())
 const searchFocused = ref(false)
 const searching = ref(false)
 const error = ref('')
@@ -122,7 +125,20 @@ const showHistory = computed(
     query.value.trim().length < 2 &&
     history.value.length > 0,
 )
-const listRows = computed(() => (showHistory.value ? history.value : results.value))
+const showFavorites = computed(
+  () =>
+    phase.value === 'search' &&
+    searchFocused.value &&
+    query.value.trim().length < 2 &&
+    favorites.value.length > 0,
+)
+const listIsIdle = computed(() => query.value.trim().length < 2)
+const listRows = computed(() => {
+  if (!listIsIdle.value) return results.value
+  const favKeys = new Set(favorites.value.map((p) => `${p.id}|${p.lat}|${p.lng}`))
+  const recent = history.value.filter((p) => !favKeys.has(`${p.id}|${p.lat}|${p.lng}`))
+  return [...favorites.value, ...recent]
+})
 
 const progress = computed(() => {
   if (!position.value || !route.value || phase.value !== 'navigating') return null
@@ -757,7 +773,10 @@ watch(query, (q) => {
     searching.value = true
     error.value = ''
     try {
-      const found = await searchPlaces(q, position.value ?? KYIV)
+      const near =
+        position.value ||
+        (map ? { lat: map.getCenter().lat, lng: map.getCenter().lng } : KYIV)
+      const found = await searchPlaces(q, near)
       if (disposed) return
       results.value = found
     } catch {
@@ -788,6 +807,21 @@ function clearSearchHistory() {
   clearHistory()
   history.value = []
 }
+
+function placeKey(p: PlaceResult) {
+  return `${p.id}|${p.lat}|${p.lng}`
+}
+
+function placeIsFavorite(place: PlaceResult) {
+  return favorites.value.some((p) => placeKey(p) === placeKey(place))
+}
+
+function togglePlaceFavorite(place: PlaceResult, ev?: Event) {
+  ev?.stopPropagation()
+  ev?.preventDefault()
+  favorites.value = toggleFavorite(place)
+}
+
 
 function onSearchBlur() {
   window.setTimeout(() => {
@@ -1008,23 +1042,87 @@ onUnmounted(() => {
     </div>
 
     <div v-if="phase === 'search' && listRows.length" class="results">
-      <div v-if="showHistory" class="results-head">
-        <span>Recent</span>
-        <button type="button" class="clear-history" @click="clearSearchHistory">Clear</button>
-      </div>
-      <button
-        v-for="place in listRows"
-        :key="place.id"
-        type="button"
-        class="result-row"
-        @click="selectPlace(place)"
-      >
-        <component :is="showHistory ? Clock : Navigation" :size="20" class="result-pin" />
-        <div class="result-text">
-          <div class="result-name">{{ place.name }}</div>
-          <div class="result-addr">{{ place.address }}</div>
+      <template v-if="listIsIdle">
+        <div v-if="showFavorites" class="results-head">
+          <span>Favorites</span>
         </div>
-      </button>
+        <div
+          v-for="place in favorites"
+          :key="'fav-' + place.id + place.lat"
+          role="button"
+          tabindex="0"
+          class="result-row"
+          @click="selectPlace(place)"
+        >
+          <Star :size="20" class="result-pin fav-on" fill="currentColor" />
+          <div class="result-text">
+            <div class="result-name">{{ place.name }}</div>
+            <div class="result-addr">{{ place.address }}</div>
+          </div>
+          <button
+            type="button"
+            class="fav-btn on"
+            aria-label="Remove favorite"
+            @click="togglePlaceFavorite(place, $event)"
+          >
+            <Star :size="22" fill="currentColor" />
+          </button>
+        </div>
+        <div v-if="showHistory" class="results-head results-head-gap">
+          <span>Recent</span>
+          <button type="button" class="clear-history" @click="clearSearchHistory">Clear</button>
+        </div>
+        <div
+          v-for="place in history.filter((h) => !placeIsFavorite(h))"
+          :key="'hist-' + place.id + place.lat"
+          role="button"
+          tabindex="0"
+          class="result-row"
+          @click="selectPlace(place)"
+        >
+          <Clock :size="20" class="result-pin" />
+          <div class="result-text">
+            <div class="result-name">{{ place.name }}</div>
+            <div class="result-addr">{{ place.address }}</div>
+          </div>
+          <button
+            type="button"
+            class="fav-btn"
+            :class="{ on: placeIsFavorite(place) }"
+            aria-label="Add favorite"
+            @click="togglePlaceFavorite(place, $event)"
+          >
+            <Star :size="22" />
+          </button>
+        </div>
+      </template>
+      <template v-else>
+        <div
+          v-for="place in results"
+          :key="'res-' + place.id + place.lat"
+          role="button"
+          tabindex="0"
+          class="result-row"
+          @click="selectPlace(place)"
+        >
+          <Navigation :size="20" class="result-pin" />
+          <div class="result-text">
+            <div class="result-name">{{ place.name }}</div>
+            <div class="result-addr">
+              <span v-if="place.distanceM != null" class="result-dist">{{ formatDistance(place.distanceM) }} · </span>{{ place.address }}
+            </div>
+          </div>
+          <button
+            type="button"
+            class="fav-btn"
+            :class="{ on: placeIsFavorite(place) }"
+            :aria-label="placeIsFavorite(place) ? 'Remove favorite' : 'Add favorite'"
+            @click="togglePlaceFavorite(place, $event)"
+          >
+            <Star :size="22" :fill="placeIsFavorite(place) ? 'currentColor' : 'none'" />
+          </button>
+        </div>
+      </template>
     </div>
 
     <!-- MANEUVER BANNER (Google-style) -->
@@ -1050,7 +1148,18 @@ onUnmounted(() => {
           {{ formatDistance(route.distance) }} · arrive {{ formatEta(route.duration) }}
           <span v-if="etaLabel" class="traffic-tag"> · {{ etaLabel }}</span>
         </div>
-        <div class="preview-dest">{{ destination.name }}</div>
+        <div class="preview-dest-row">
+          <div class="preview-dest">{{ destination.name }}</div>
+          <button
+            type="button"
+            class="fav-btn preview-fav"
+            :class="{ on: placeIsFavorite(destination) }"
+            :aria-label="placeIsFavorite(destination) ? 'Remove favorite' : 'Add favorite'"
+            @click="togglePlaceFavorite(destination)"
+          >
+            <Star :size="26" :fill="placeIsFavorite(destination) ? 'currentColor' : 'none'" />
+          </button>
+        </div>
       </div>
       <button class="go-btn" type="button" @click="startNavigation">
         <Navigation :size="26" />
@@ -1298,6 +1407,44 @@ onUnmounted(() => {
   letter-spacing: 0;
   cursor: pointer;
   padding: 0.25rem;
+}
+
+
+.fav-btn {
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  margin: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #9aa0a6;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.fav-btn.on,
+.fav-on {
+  color: #f9ab00;
+}
+.fav-btn:active {
+  transform: scale(0.94);
+}
+.preview-dest-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.preview-fav {
+  margin-left: auto;
+}
+.results-head-gap {
+  margin-top: 0.35rem;
+}
+.result-dist {
+  color: #1a73e8;
+  font-weight: 600;
 }
 
 .result-row {

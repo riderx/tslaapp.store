@@ -6,6 +6,8 @@ export type PlaceResult = {
   address: string
   lat: number
   lng: number
+  /** Distance from search origin when ranked nearby */
+  distanceM?: number
 }
 
 export type ManeuverType =
