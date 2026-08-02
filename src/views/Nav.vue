@@ -30,6 +30,7 @@ import {
   type RadarSection,
 } from '../nav/radars'
 import type { LatLng, PlaceResult, RouteResult } from '../nav/types'
+import { installNavTileCache, loadNavStyle, prefetchRouteTiles } from '../nav/tileCache'
 
 const router = useRouter()
 
@@ -284,7 +285,7 @@ function onMapLoad() {
     id: 'route-remaining-casing',
     type: 'line',
     source: 'route-remaining',
-    paint: { 'line-color': '#185abc', 'line-width': 12, 'line-opacity': 0.35 },
+    paint: { 'line-color': '#185abc', 'line-width': 14, 'line-opacity': 0.45 },
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   })
   map.addLayer({
@@ -301,7 +302,7 @@ function onMapLoad() {
         '#d93025',
         '#1a73e8',
       ],
-      'line-width': 7,
+      'line-width': 8,
     },
     layout: { 'line-cap': 'round', 'line-join': 'round' },
   })
@@ -489,11 +490,20 @@ function pauseFollowFromGesture() {
   stopCameraLoop()
 }
 
-function initMap() {
+async function initMap() {
   if (!mapEl.value || disposed) return
+  installNavTileCache()
+  let style: string | object = STYLE
+  try {
+    style = await loadNavStyle(STYLE)
+  } catch {
+    // First visit offline — MapLibre will still try the remote style URL
+    style = STYLE
+  }
+  if (disposed || !mapEl.value) return
   map = new maplibregl.Map({
     container: mapEl.value,
-    style: STYLE,
+    style,
     center: [KYIV.lng, KYIV.lat],
     zoom: 13,
     pitch: 0,
@@ -503,6 +513,7 @@ function initMap() {
     touchZoomRotate: true,
     touchPitch: true,
     pitchWithRotate: true,
+    maxTileCacheZoomLevels: 8,
   })
   map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), 'bottom-right')
   // Explicit 2-finger twist to change bearing (heading)
@@ -546,6 +557,11 @@ function destroyMap() {
     map.remove()
     map = null
   }
+}
+
+function warmRouteTiles(coords: LatLng[]) {
+  if (!coords.length) return
+  void prefetchRouteTiles(coords)
 }
 
 function setRouteLine(coords: LatLng[], splitAt?: LatLng) {
@@ -790,6 +806,7 @@ async function buildRoute() {
     if (disposed) return
     route.value = r
     setRouteLine(r.geometry)
+    warmRouteTiles(r.geometry)
     phase.value = 'preview'
     fitRoute(from, { lat: dest.lat, lng: dest.lng })
   } catch {
@@ -813,6 +830,7 @@ async function reroute() {
     if (disposed) return
     route.value = r
     setRouteLine(r.geometry, position.value)
+    warmRouteTiles(r.geometry)
   } catch {
     // keep old route
   } finally {
@@ -844,6 +862,7 @@ function startNavigation() {
   lastRouteSplitAt = 0
   lastSplitSeg = -1
   setRouteLine(route.value.geometry, position.value)
+  warmRouteTiles(route.value.geometry)
   const p = computeProgress(position.value, route.value, heading.value)
   upsertLocMarker(position.value)
   const aheadM = lookAheadMeters(NAV_ZOOM)
