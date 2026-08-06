@@ -1,177 +1,283 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { Mic, MicOff, PhoneOff, Play } from 'lucide-vue-next'
+import { Mic, MicOff, PhoneOff, Phone } from 'lucide-vue-next'
 import { useCallStore } from '@/stores/callStore'
 
 const call = useCallStore()
-const pressing = ref(false)
-const longFired = ref(false)
-let pressTimer: number | null = null
-const LONG_MS = 650
+const ending = ref(false)
+const answering = ref(false)
 
 const visible = computed(() => call.phase !== 'idle')
-const icon = computed(() => {
-  if (call.phase === 'ringing') return Play
-  if (call.phase === 'in_call' && call.muted) return MicOff
-  if (call.phase === 'in_call') return Mic
-  return Play
+const inCall = computed(() => call.phase === 'in_call')
+const ringing = computed(() => call.phase === 'ringing')
+const connecting = computed(() => call.phase === 'connecting')
+
+const statusText = computed(() => {
+  if (ringing.value) return 'Incoming group call'
+  if (connecting.value) return 'Connecting…'
+  if (!call.micAvailable) return 'Listening only'
+  return call.muted ? 'Muted' : 'Live'
 })
 
-function clearPress() {
-  if (pressTimer) {
-    clearTimeout(pressTimer)
-    pressTimer = null
-  }
-  pressing.value = false
-}
+const micIcon = computed(() => (call.muted || !call.micAvailable ? MicOff : Mic))
 
-function onPointerDown() {
-  if (call.phase !== 'in_call') return
-  pressing.value = true
-  longFired.value = false
-  pressTimer = window.setTimeout(async () => {
-    pressTimer = null
-    longFired.value = true
-    pressing.value = false
-    await call.hangUp()
-  }, LONG_MS)
-}
-
-async function onPointerUp() {
-  const wasLong = longFired.value
-  clearPress()
-  if (wasLong) return
-  if (call.phase === 'in_call') {
-    call.toggleMute()
-  }
-}
-
-async function onClick() {
-  if (call.phase === 'ringing') {
+async function answer() {
+  if (answering.value || ending.value) return
+  answering.value = true
+  try {
     await call.answerCall()
+  } finally {
+    answering.value = false
   }
 }
 
-onBeforeUnmount(clearPress)
+async function endCall() {
+  if (ending.value) return
+  ending.value = true
+  try {
+    if (call.phase === 'ringing') call.declineRing()
+    else await call.hangUp()
+  } finally {
+    ending.value = false
+  }
+}
+
+function toggleMute() {
+  if (!inCall.value || !call.micAvailable) return
+  call.toggleMute()
+}
+
+onBeforeUnmount(() => {
+  ending.value = false
+  answering.value = false
+})
 </script>
 
 <template>
-  <div v-if="visible" class="overlay" :class="{ ringing: call.phase === 'ringing' }">
-    <div class="card">
-      <div class="meta">
-        <div class="status">
-          <span v-if="call.phase === 'ringing'">Incoming group call</span>
-          <span v-else-if="call.phase === 'connecting'">Connecting…</span>
-          <span v-else>Live · {{ call.remoteCount }} listening</span>
+  <Teleport to="body">
+    <div
+      v-if="visible"
+      class="call-layer"
+      :class="{ ringing }"
+      role="dialog"
+      aria-live="polite"
+      :aria-label="statusText"
+    >
+      <div class="call-bar">
+        <div class="info">
+          <div class="status">{{ statusText }}</div>
+          <div class="title">{{ call.groupName || 'Group call' }}</div>
+          <div v-if="call.fromName && ringing" class="from">{{ call.fromName }}</div>
+          <div v-else-if="inCall" class="from">
+            {{ call.remoteCount }} remote
+            <span v-if="!call.micAvailable"> · speak from phone</span>
+          </div>
+          <div v-if="call.error" class="error" role="alert">{{ call.error }}</div>
         </div>
-        <div class="title">{{ call.groupName }}</div>
-        <div class="from" v-if="call.fromName">{{ call.fromName }}</div>
-        <div class="hint" v-if="call.phase === 'in_call' && !call.micAvailable">
-          Mic blocked in this browser — listening only. Speak from your phone.
+
+        <div class="actions">
+          <template v-if="ringing">
+            <button
+              type="button"
+              class="btn decline"
+              aria-label="Decline call"
+              :disabled="ending || answering"
+              @click="endCall"
+            >
+              <PhoneOff class="ico" />
+              <span>Decline</span>
+            </button>
+            <button
+              type="button"
+              class="btn answer"
+              aria-label="Answer call"
+              :disabled="ending || answering"
+              @click="answer"
+            >
+              <Phone class="ico" />
+              <span>{{ answering ? 'Joining…' : 'Answer' }}</span>
+            </button>
+          </template>
+
+          <template v-else>
+            <button
+              v-if="inCall && call.micAvailable"
+              type="button"
+              class="btn mute"
+              :class="{ on: call.muted }"
+              :aria-label="call.muted ? 'Unmute microphone' : 'Mute microphone'"
+              @click="toggleMute"
+            >
+              <component :is="micIcon" class="ico" />
+              <span>{{ call.muted ? 'Unmute' : 'Mute' }}</span>
+            </button>
+            <button
+              type="button"
+              class="btn end"
+              aria-label="End call"
+              :disabled="ending || connecting"
+              @click="endCall"
+            >
+              <PhoneOff class="ico" />
+              <span>{{ ending ? 'Ending…' : connecting ? 'Cancel' : 'End' }}</span>
+            </button>
+          </template>
         </div>
-        <div class="hint" v-else-if="call.phase === 'in_call'">
-          Tap to mute mic · hold to end call
-        </div>
-        <div class="error" v-if="call.error">{{ call.error }}</div>
       </div>
-
-      <button
-        class="play-button"
-        :class="{ muted: call.muted, pressing }"
-        :disabled="call.phase === 'connecting'"
-        @click="onClick"
-        @pointerdown.prevent="onPointerDown"
-        @pointerup="onPointerUp"
-        @pointerleave="clearPress"
-        @pointercancel="clearPress"
-      >
-        <component :is="icon" class="play-icon" />
-        <span>{{ call.playLabel }}</span>
-      </button>
-
-      <button v-if="call.phase === 'ringing'" class="decline" @click="call.hangUp()">
-        <PhoneOff class="w-4 h-4" /> Decline
-      </button>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <style scoped>
-.overlay {
+.call-layer {
   position: fixed;
-  inset: 0;
-  z-index: 80;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10000;
   display: flex;
-  align-items: flex-end;
   justify-content: center;
-  padding: 1.25rem;
-  background: linear-gradient(180deg, transparent 35%, rgba(0, 0, 0, 0.82));
+  padding: 0.75rem 0.75rem calc(0.75rem + env(safe-area-inset-bottom, 0px));
   pointer-events: none;
+  background: transparent;
 }
-.overlay.ringing {
-  background: linear-gradient(180deg, rgba(232, 33, 39, 0.15), rgba(0, 0, 0, 0.88));
-  animation: pulse 1.2s ease-in-out infinite;
+
+.call-layer.ringing {
+  /* Soft top wash only — tabs/map stay visible and tappable above the bar */
+  background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.35) 70%);
 }
-.card {
-  width: min(480px, 100%);
+
+.call-bar {
   pointer-events: auto;
-  background: #141414;
-  border: 1px solid #2a2a2a;
+  width: min(560px, 100%);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.85rem 1rem;
   border-radius: 1rem;
-  padding: 1.25rem;
+  border: 1px solid #2e2e2e;
+  background: rgba(18, 18, 18, 0.94);
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
 }
-.meta { margin-bottom: 1rem; }
+
+.ringing .call-bar {
+  border-color: rgba(232, 33, 39, 0.55);
+  animation: ring-pulse 1.4s ease-in-out infinite;
+}
+
+.info {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
 .status {
-  color: #a0a0a0;
-  font-size: 0.75rem;
+  color: #a3a3a3;
+  font-size: 0.7rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
 .title {
-  margin-top: 0.25rem;
-  font-size: 1.35rem;
+  margin-top: 0.15rem;
+  font-size: 1.05rem;
   font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.from { color: #ccc; margin-top: 0.15rem; }
-.hint { margin-top: 0.5rem; color: #888; font-size: 0.8rem; }
-.error { margin-top: 0.5rem; color: #e82127; font-size: 0.85rem; }
-.play-button {
-  width: 100%;
-  padding: 1rem;
-  background-color: #e82127;
-  color: white;
-  border: none;
-  border-radius: 0.5rem;
+
+.from {
+  margin-top: 0.15rem;
+  color: #c4c4c4;
+  font-size: 0.8rem;
+}
+
+.error {
+  margin-top: 0.35rem;
+  color: #f87171;
+  font-size: 0.8rem;
+}
+
+.actions {
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
+  flex: 0 0 auto;
 }
-.play-button.muted { background: #444; }
-.play-button.pressing { background: #8a1418; transform: scale(0.98); }
-.play-button:disabled { opacity: 0.6; }
-.play-icon { width: 1.5rem; height: 1.5rem; }
-.decline {
-  margin-top: 0.75rem;
-  width: 100%;
-  display: flex;
+
+.btn {
+  min-height: 48px;
+  min-width: 48px;
+  padding: 0.7rem 1rem;
+  border-radius: 0.65rem;
+  border: 1px solid transparent;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  padding: 0.75rem;
-  background: transparent;
-  border: 1px solid #333;
-  color: #ddd;
-  border-radius: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
   cursor: pointer;
+  touch-action: manipulation;
+  transition: transform 160ms ease, opacity 160ms ease, background-color 160ms ease;
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.9; }
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn .ico {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+}
+
+.btn.answer {
+  background: #16a34a;
+  color: #fff;
+}
+
+.btn.decline,
+.btn.end {
+  background: #e82127;
+  color: #fff;
+}
+
+.btn.mute {
+  background: #262626;
+  border-color: #3a3a3a;
+  color: #eee;
+}
+
+.btn.mute.on {
+  background: #3f3f46;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ringing .call-bar {
+    animation: none;
+  }
+  .btn {
+    transition: none;
+  }
+}
+
+@keyframes ring-pulse {
+  0%,
+  100% {
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45), 0 0 0 0 rgba(232, 33, 39, 0.35);
+  }
+  50% {
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45), 0 0 0 6px rgba(232, 33, 39, 0);
+  }
 }
 </style>

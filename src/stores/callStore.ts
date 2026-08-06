@@ -119,13 +119,19 @@ export const useCallStore = defineStore('call', () => {
     muted.value = client.toggleMute()
   }
 
+  /** Dismiss incoming ring without ending the call for others. */
+  function declineRing() {
+    stopRingTone()
+    forceReset()
+  }
+
   async function hangUp() {
     stopRingTone()
     const id = groupId.value
     const c = client
     client = null
     if (c) await c.hangUp().catch(() => null)
-    else if (id) await friendsApi.endCall(id).catch(() => null)
+    else if (id && phase.value !== 'ringing') await friendsApi.endCall(id).catch(() => null)
     forceReset()
   }
 
@@ -163,6 +169,7 @@ export const useCallStore = defineStore('call', () => {
     startGroupCall,
     answerCall,
     toggleMute,
+    declineRing,
     hangUp,
     onPlayClick,
   }
