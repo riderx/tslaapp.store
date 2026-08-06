@@ -13,7 +13,7 @@ const ringing = computed(() => call.phase === 'ringing')
 const connecting = computed(() => call.phase === 'connecting')
 
 const statusText = computed(() => {
-  if (ringing.value) return 'Incoming group call'
+  if (ringing.value) return call.callKind === 'dm' ? 'Incoming call' : 'Incoming group call'
   if (connecting.value) return 'Connecting…'
   if (!call.micAvailable) return 'Listening only'
   return call.muted ? 'Muted' : 'Live'

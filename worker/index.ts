@@ -283,157 +283,58 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return json({ groups: await listGroups(env, user.id) })
   }
 
-  const callMatch = path.match(/^\/api\/groups\/([^/]+)\/call(?:\/(join|end|tracks|renegotiate))?$/)
-  if (callMatch) {
-    const groupId = callMatch[1]
-    const action = callMatch[2] || 'start'
-    if (!(await isGroupMember(env, groupId, user.id))) return json({ error: 'Forbidden' }, 403)
+  // 1:1 friend call
+  const dmCallMatch = path.match(/^\/api\/friends\/([^/]+)\/call$/)
+  if (dmCallMatch && request.method === 'POST') {
+    const friendId = dmCallMatch[1]
+    if (friendId === user.id) return json({ error: 'Cannot call yourself' }, 400)
+    if (!(await areMutualFriends(env, user.id, friendId))) {
+      return json({ error: 'Must be mutual friends to call' }, 403)
+    }
+    const friend = await env.DB.prepare('SELECT id, name FROM users WHERE id = ?')
+      .bind(friendId)
+      .first<{ id: string; name: string }>()
+    if (!friend) return json({ error: 'User not found' }, 404)
+    const roomId = dmRoomId(user.id, friendId)
+    // Callee sees caller's name on the ring banner
+    return handleCallRoom(request, env, user, roomId, user.name, 'start', [user.id, friendId])
+  }
+
+  // Group call start (legacy path)
+  const groupCallStart = path.match(/^\/api\/groups\/([^/]+)\/call$/)
+  if (groupCallStart && request.method === 'POST') {
+    const groupId = groupCallStart[1]
+    const participants = await callParticipants(env, groupId, user.id)
+    if (!participants) return json({ error: 'Forbidden' }, 403)
     const group = await env.DB.prepare('SELECT * FROM groups WHERE id = ?')
       .bind(groupId)
       .first<{ id: string; name: string }>()
     if (!group) return json({ error: 'Group not found' }, 404)
-    const room = callRoomStub(env, groupId)
+    return handleCallRoom(request, env, user, groupId, group.name, 'start', participants)
+  }
 
-    if (action === 'start' && request.method === 'POST') {
-      if (!sfuConfigured(env)) {
-        return json(
-          {
-            error:
-              'Realtime SFU not configured. Create a Calls app and set CALLS_APP_ID / CALLS_APP_SECRET.',
-          },
-          503,
-        )
-      }
-      const stateRes = await room.fetch('https://call/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          groupId,
-          groupName: group.name,
-          startedBy: user.id,
-          startedByName: user.name,
-        }),
-      })
-      const call = await stateRes.json<any>()
-      const members = await env.DB.prepare(
-        'SELECT user_id FROM group_members WHERE group_id = ?',
-      )
-        .bind(groupId)
-        .all<{ user_id: string }>()
-      await Promise.all(
-        (members.results || []).map((m) =>
-          notifyUser(env, m.user_id, {
-            type: 'ring',
-            groupId,
-            groupName: group.name,
-            from: { id: user.id, name: user.name },
-            startedAt: call.startedAt,
-          }),
-        ),
-      )
-      return json({ call })
-    }
+  // Shared join / tracks / renegotiate / end for group + dm rooms
+  const callAction = path.match(/^\/api\/calls\/([^/]+)\/(join|end|tracks|renegotiate)$/)
+  if (callAction) {
+    const roomId = decodeURIComponent(callAction[1])
+    const action = callAction[2]
+    const participants = await callParticipants(env, roomId, user.id)
+    if (!participants) return json({ error: 'Forbidden' }, 403)
+    const roomName = roomId.startsWith('dm:') ? 'Direct call' : roomId
+    return handleCallRoom(request, env, user, roomId, roomName, action, participants)
+  }
 
-    if (action === 'join' && request.method === 'POST') {
-      const state = await (await room.fetch('https://call/state')).json<any>()
-      if (!state.active) return json({ error: 'No active call' }, 404)
-      const session = await createSession(env)
-      return json({
-        call: state,
-        sessionId: session.sessionId,
-        tracks: state.tracks.filter((t: any) => t.userId !== user.id),
-      })
-    }
-
-    if (action === 'tracks' && request.method === 'POST') {
-      const body = await request.json<{
-        sessionId: string
-        sessionDescription?: { sdp: string; type: string }
-        tracks: any[]
-        publish?: { trackName: string }
-      }>()
-      const result = await newTracks(env, body.sessionId, {
-        sessionDescription: body.sessionDescription,
-        tracks: body.tracks,
-      })
-      if (body.publish?.trackName) {
-        const stateRes = await room.fetch('https://call/publish', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: user.id,
-            name: user.name,
-            sessionId: body.sessionId,
-            trackName: body.publish.trackName,
-          }),
-        })
-        const call = await stateRes.json<any>()
-        const members = await env.DB.prepare(
-          'SELECT user_id FROM group_members WHERE group_id = ?',
-        )
-          .bind(groupId)
-          .all<{ user_id: string }>()
-        await Promise.all(
-          (members.results || [])
-            .filter((m) => m.user_id !== user.id)
-            .map((m) =>
-              notifyUser(env, m.user_id, {
-                type: 'track_published',
-                groupId,
-                track: {
-                  userId: user.id,
-                  name: user.name,
-                  sessionId: body.sessionId,
-                  trackName: body.publish!.trackName,
-                },
-              }),
-            ),
-        )
-        return json({ result, call })
-      }
-      return json({ result })
-    }
-
-    if (action === 'renegotiate' && request.method === 'POST') {
-      const body = await request.json<{
-        sessionId: string
-        sessionDescription: { sdp: string; type: string }
-      }>()
-      const result = await renegotiate(env, body.sessionId, {
-        sessionDescription: body.sessionDescription,
-      })
-      return json({ result })
-    }
-
-    if (action === 'end' && request.method === 'POST') {
-      const body = await request.json<{ sessionId?: string; trackName?: string }>().catch(() => ({} as any))
-      if (body.sessionId && body.trackName) {
-        await closeTracks(env, body.sessionId, {
-          tracks: [{ mid: undefined, trackName: body.trackName }],
-          force: true,
-        }).catch(() => null)
-      }
-      await room.fetch('https://call/unpublish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id }),
-      })
-      const state = await (await room.fetch('https://call/state')).json<any>()
-      if (!state.active || (state.tracks || []).length === 0) {
-        await room.fetch('https://call/end', { method: 'POST' })
-        const members = await env.DB.prepare(
-          'SELECT user_id FROM group_members WHERE group_id = ?',
-        )
-          .bind(groupId)
-          .all<{ user_id: string }>()
-        await Promise.all(
-          (members.results || []).map((m) =>
-            notifyUser(env, m.user_id, { type: 'call_ended', groupId }),
-          ),
-        )
-      }
-      return json({ ok: true })
-    }
+  // Back-compat group call action paths
+  const legacyCall = path.match(/^\/api\/groups\/([^/]+)\/call\/(join|end|tracks|renegotiate)$/)
+  if (legacyCall) {
+    const groupId = legacyCall[1]
+    const action = legacyCall[2]
+    const participants = await callParticipants(env, groupId, user.id)
+    if (!participants) return json({ error: 'Forbidden' }, 403)
+    const group = await env.DB.prepare('SELECT name FROM groups WHERE id = ?')
+      .bind(groupId)
+      .first<{ name: string }>()
+    return handleCallRoom(request, env, user, groupId, group?.name || 'Group', action, participants)
   }
 
   return json({ error: 'Not found' }, 404)
@@ -457,6 +358,184 @@ async function setLocation(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, lat, lng, heading }),
   })
+}
+
+
+function dmRoomId(a: string, b: string) {
+  return `dm:${[a, b].sort().join(':')}`
+}
+
+async function areMutualFriends(env: Env, a: string, b: string) {
+  const row = await env.DB.prepare(
+    `SELECT 1 as ok FROM friendships f1
+     JOIN friendships f2
+       ON f1.requester_id = f2.addressee_id AND f1.addressee_id = f2.requester_id
+     WHERE f1.requester_id = ? AND f1.addressee_id = ? AND f1.status = 'accepted' AND f2.status = 'accepted'`,
+  )
+    .bind(a, b)
+    .first()
+  return Boolean(row)
+}
+
+async function callParticipants(env: Env, roomId: string, userId: string): Promise<string[] | null> {
+  if (roomId.startsWith('dm:')) {
+    const parts = roomId.slice(3).split(':')
+    if (parts.length !== 2) return null
+    const [a, b] = parts
+    if (userId !== a && userId !== b) return null
+    if (!(await areMutualFriends(env, a, b))) return null
+    return [a, b]
+  }
+  if (!(await isGroupMember(env, roomId, userId))) return null
+  const members = await env.DB.prepare('SELECT user_id FROM group_members WHERE group_id = ?')
+    .bind(roomId)
+    .all<{ user_id: string }>()
+  return (members.results || []).map((m) => m.user_id)
+}
+
+async function handleCallRoom(
+  request: Request,
+  env: Env,
+  user: UserRow,
+  roomId: string,
+  roomName: string,
+  action: string,
+  participantIds: string[],
+) {
+  const room = callRoomStub(env, roomId)
+
+  if (action === 'start' && request.method === 'POST') {
+    if (!sfuConfigured(env)) {
+      return json(
+        {
+          error:
+            'Realtime SFU not configured. Create a Calls app and set CALLS_APP_ID / CALLS_APP_SECRET.',
+        },
+        503,
+      )
+    }
+    const stateRes = await room.fetch('https://call/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        groupId: roomId,
+        groupName: roomName,
+        startedBy: user.id,
+        startedByName: user.name,
+      }),
+    })
+    const call = await stateRes.json<any>()
+    await Promise.all(
+      participantIds
+        .filter((uid) => uid !== user.id)
+        .map((uid) =>
+          notifyUser(env, uid, {
+            type: 'ring',
+            groupId: roomId,
+            groupName: roomName,
+            from: { id: user.id, name: user.name },
+            startedAt: call.startedAt,
+            callKind: roomId.startsWith('dm:') ? 'dm' : 'group',
+          }),
+        ),
+    )
+    return json({ call, roomId })
+  }
+
+  if (action === 'join' && request.method === 'POST') {
+    const state = await (await room.fetch('https://call/state')).json<any>()
+    if (!state.active) return json({ error: 'No active call' }, 404)
+    const session = await createSession(env)
+    return json({
+      call: state,
+      sessionId: session.sessionId,
+      tracks: state.tracks.filter((t: any) => t.userId !== user.id),
+      roomId,
+    })
+  }
+
+  if (action === 'tracks' && request.method === 'POST') {
+    const body = await request.json<{
+      sessionId: string
+      sessionDescription?: { sdp: string; type: string }
+      tracks: any[]
+      publish?: { trackName: string }
+    }>()
+    const result = await newTracks(env, body.sessionId, {
+      sessionDescription: body.sessionDescription,
+      tracks: body.tracks,
+    })
+    if (body.publish?.trackName) {
+      const stateRes = await room.fetch('https://call/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          name: user.name,
+          sessionId: body.sessionId,
+          trackName: body.publish.trackName,
+        }),
+      })
+      const call = await stateRes.json<any>()
+      await Promise.all(
+        participantIds
+          .filter((uid) => uid !== user.id)
+          .map((uid) =>
+            notifyUser(env, uid, {
+              type: 'track_published',
+              groupId: roomId,
+              track: {
+                userId: user.id,
+                name: user.name,
+                sessionId: body.sessionId,
+                trackName: body.publish!.trackName,
+              },
+            }),
+          ),
+      )
+      return json({ result, call })
+    }
+    return json({ result })
+  }
+
+  if (action === 'renegotiate' && request.method === 'POST') {
+    const body = await request.json<{
+      sessionId: string
+      sessionDescription: { sdp: string; type: string }
+    }>()
+    const result = await renegotiate(env, body.sessionId, {
+      sessionDescription: body.sessionDescription,
+    })
+    return json({ result })
+  }
+
+  if (action === 'end' && request.method === 'POST') {
+    const body = await request.json<{ sessionId?: string; trackName?: string }>().catch(() => ({} as any))
+    if (body.sessionId && body.trackName) {
+      try {
+        await closeTracks(env, body.sessionId, {
+          tracks: [{ mid: undefined, trackName: body.trackName }],
+        })
+      } catch {
+        /* ignore */
+      }
+    }
+    await room.fetch('https://call/unpublish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: user.id }),
+    })
+    const state = await (await room.fetch('https://call/state')).json<any>()
+    if (!state.active || (state.tracks || []).length === 0) {
+      await room.fetch('https://call/end', { method: 'POST' })
+      await Promise.all(
+        participantIds.map((uid) => notifyUser(env, uid, { type: 'call_ended', groupId: roomId })),
+      )
+    }
+    return json({ ok: true })
+  }
+
+  return json({ error: 'Not found' }, 404)
 }
 
 async function listFriends(env: Env, userId: string): Promise<FriendView[]> {

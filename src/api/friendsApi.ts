@@ -80,24 +80,29 @@ export const friendsApi = {
       body: JSON.stringify({ userId }),
     }),
   startCall: (groupId: string) =>
-    api<{ call: any }>(`/api/groups/${groupId}/call`, { method: 'POST', body: '{}' }),
-  joinCall: (groupId: string) =>
-    api<{ call: any; sessionId: string; tracks: any[] }>(`/api/groups/${groupId}/call/join`, {
+    api<{ call: any; roomId?: string }>(`/api/groups/${groupId}/call`, { method: 'POST', body: '{}' }),
+  startFriendCall: (friendId: string) =>
+    api<{ call: any; roomId: string }>(`/api/friends/${friendId}/call`, {
       method: 'POST',
       body: '{}',
     }),
-  tracks: (groupId: string, body: unknown) =>
-    api<{ result: any; call?: any }>(`/api/groups/${groupId}/call/tracks`, {
+  joinCall: (roomId: string) =>
+    api<{ call: any; sessionId: string; tracks: any[]; roomId?: string }>(
+      `/api/calls/${encodeURIComponent(roomId)}/join`,
+      { method: 'POST', body: '{}' },
+    ),
+  tracks: (roomId: string, body: unknown) =>
+    api<{ result: any; call?: any }>(`/api/calls/${encodeURIComponent(roomId)}/tracks`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  renegotiate: (groupId: string, body: unknown) =>
-    api<{ result: any }>(`/api/groups/${groupId}/call/renegotiate`, {
+  renegotiate: (roomId: string, body: unknown) =>
+    api<{ result: any }>(`/api/calls/${encodeURIComponent(roomId)}/renegotiate`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  endCall: (groupId: string, body: unknown = {}) =>
-    api<{ ok: boolean }>(`/api/groups/${groupId}/call/end`, {
+  endCall: (roomId: string, body: unknown = {}) =>
+    api<{ ok: boolean }>(`/api/calls/${encodeURIComponent(roomId)}/end`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
