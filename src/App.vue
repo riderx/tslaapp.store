@@ -3,8 +3,10 @@ import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import CallOverlay from '@/components/CallOverlay.vue'
 import { useFriendsStore } from '@/stores/friendsStore'
+import { useCallStore } from '@/stores/callStore'
 
 const friends = useFriendsStore()
+useCallStore() // bind ring listener for every route/tab
 onMounted(() => {
   friends.bootstrap().catch(() => null)
 })

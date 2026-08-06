@@ -11,6 +11,7 @@ export const useCallStore = defineStore('call', () => {
   const groupName = ref('')
   const fromName = ref('')
   const muted = ref(false)
+  const micAvailable = ref(true)
   const error = ref<string | null>(null)
   const remoteCount = ref(0)
   let client: GroupCallClient | null = null
@@ -20,6 +21,7 @@ export const useCallStore = defineStore('call', () => {
   const playLabel = computed(() => {
     if (phase.value === 'ringing') return 'Answer Call'
     if (phase.value === 'connecting') return 'Connecting…'
+    if (phase.value === 'in_call' && !micAvailable.value) return 'Listening'
     if (phase.value === 'in_call') return muted.value ? 'Unmute Mic' : 'Mute Mic'
     return 'Start'
   })
@@ -103,7 +105,8 @@ export const useCallStore = defineStore('call', () => {
         remoteCount.value = client?.remoteAudio.size || 0
       }
       await client.join()
-      muted.value = false
+      micAvailable.value = client.micAvailable
+      muted.value = !client.micAvailable || client.muted
       phase.value = 'in_call'
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Could not join call'
@@ -112,8 +115,14 @@ export const useCallStore = defineStore('call', () => {
   }
 
   function toggleMute() {
-    if (phase.value !== 'in_call' || !client) return
+    if (phase.value !== 'in_call' || !client || !micAvailable.value) return
     muted.value = client.toggleMute()
+  }
+
+  /** Dismiss incoming ring without ending the call for others. */
+  function declineRing() {
+    stopRingTone()
+    forceReset()
   }
 
   async function hangUp() {
@@ -122,7 +131,7 @@ export const useCallStore = defineStore('call', () => {
     const c = client
     client = null
     if (c) await c.hangUp().catch(() => null)
-    else if (id) await friendsApi.endCall(id).catch(() => null)
+    else if (id && phase.value !== 'ringing') await friendsApi.endCall(id).catch(() => null)
     forceReset()
   }
 
@@ -133,6 +142,7 @@ export const useCallStore = defineStore('call', () => {
     groupName.value = ''
     fromName.value = ''
     muted.value = false
+    micAvailable.value = true
     remoteCount.value = 0
     client = null
   }
@@ -151,6 +161,7 @@ export const useCallStore = defineStore('call', () => {
     groupName,
     fromName,
     muted,
+    micAvailable,
     error,
     remoteCount,
     isActive,
@@ -158,6 +169,7 @@ export const useCallStore = defineStore('call', () => {
     startGroupCall,
     answerCall,
     toggleMute,
+    declineRing,
     hangUp,
     onPlayClick,
   }
