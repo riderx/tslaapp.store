@@ -10,6 +10,7 @@ export const useCallStore = defineStore('call', () => {
   const groupId = ref<string | null>(null)
   const groupName = ref('')
   const fromName = ref('')
+  const callKind = ref<'group' | 'dm'>('group')
   const muted = ref(false)
   const micAvailable = ref(true)
   const error = ref<string | null>(null)
@@ -35,8 +36,9 @@ export const useCallStore = defineStore('call', () => {
     if (msg.type === 'ring') {
       if (phase.value === 'in_call' || phase.value === 'connecting') return
       groupId.value = msg.groupId
-      groupName.value = msg.groupName || 'Group'
+      groupName.value = msg.groupName || 'Call'
       fromName.value = msg.from?.name || 'Friend'
+      callKind.value = msg.callKind === 'dm' || String(msg.groupId || '').startsWith('dm:') ? 'dm' : 'group'
       phase.value = 'ringing'
       startRingTone()
     }
@@ -84,12 +86,30 @@ export const useCallStore = defineStore('call', () => {
     groupId.value = id
     groupName.value = name
     fromName.value = 'You'
+    callKind.value = 'group'
     phase.value = 'connecting'
     try {
       await friendsApi.startCall(id)
       await answerCall()
     } catch (e) {
       phase.value = 'idle'
+      error.value = e instanceof Error ? e.message : 'Call failed'
+    }
+  }
+
+  async function startFriendCall(friendId: string, friendName: string) {
+    error.value = null
+    groupName.value = friendName
+    fromName.value = 'You'
+    callKind.value = 'dm'
+    phase.value = 'connecting'
+    try {
+      const res = await friendsApi.startFriendCall(friendId)
+      groupId.value = res.roomId
+      await answerCall()
+    } catch (e) {
+      phase.value = 'idle'
+      groupId.value = null
       error.value = e instanceof Error ? e.message : 'Call failed'
     }
   }
@@ -141,6 +161,7 @@ export const useCallStore = defineStore('call', () => {
     groupId.value = null
     groupName.value = ''
     fromName.value = ''
+    callKind.value = 'group'
     muted.value = false
     micAvailable.value = true
     remoteCount.value = 0
@@ -160,6 +181,7 @@ export const useCallStore = defineStore('call', () => {
     groupId,
     groupName,
     fromName,
+    callKind,
     muted,
     micAvailable,
     error,
@@ -167,6 +189,7 @@ export const useCallStore = defineStore('call', () => {
     isActive,
     playLabel,
     startGroupCall,
+    startFriendCall,
     answerCall,
     toggleMute,
     declineRing,

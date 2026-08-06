@@ -99,6 +99,15 @@ async function callGroup(id: string, name: string) {
   }
 }
 
+async function callFriend(id: string, name: string) {
+  notice.value = ''
+  try {
+    await callStore.startFriendCall(id, name)
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : 'Call failed'
+  }
+}
+
 function toggleMember(id: string) {
   if (selectedMembers.value.includes(id)) {
     selectedMembers.value = selectedMembers.value.filter((x) => x !== id)
@@ -184,6 +193,14 @@ function toggleMember(id: string) {
               <div class="name">{{ f.name }}</div>
               <div class="sub">{{ f.friendCode }} · {{ f.status }}{{ f.direction === 'outgoing' && f.status === 'pending' ? ' (waiting)' : '' }}</div>
             </div>
+            <button
+              v-if="f.status === 'accepted'"
+              class="primary small call"
+              aria-label="Call friend"
+              @click="callFriend(f.id, f.name)"
+            >
+              <Phone class="icon-sm" /> Call
+            </button>
           </div>
         </div>
       </section>
