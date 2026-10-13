@@ -1,5 +1,5 @@
 /// <reference lib="es2020" />
-import { ENGINE_SYNTH_PROCESSOR, type EngineSynthOptions, type EngineSynthSpec } from './types';
+import { ENGINE_SYNTH_PROCESSOR, type ElectricVoice, type EngineSynthOptions, type EngineSynthSpec, type JetVoice } from './types';
 
 /* AudioWorkletGlobalScope is not part of the DOM lib */
 declare const sampleRate: number;
@@ -169,6 +169,19 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
     tickEnv = 0;
     tickBp = new Biquad();
 
+    /* Electric and jet voices */
+    gate = 0;
+    duck = 1;
+    voicePhases: number[] = [];
+    motorPhase = 0;
+    vibrato = 0;
+    voiceLp = new Biquad();
+    rumbleLp = new Biquad();
+    jetRpm = 0;
+    kGate = onePole(0.35);
+    kDuck = onePole(0.05);
+    kJet = onePole(0.6);
+
     /* Output */
     dcBlock = new Biquad();
     kRpm = onePole(0.025);
@@ -210,6 +223,9 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         this.dcBlock.highpass(32, 0.7);
         this.starterBp.bandpass(1400, 0.9);
         this.tickBp.bandpass(4200, 6);
+        this.rumbleLp.lowpass(90, 0.9);
+        if (spec.voice?.kind === 'electric') this.voicePhases = spec.voice.partials.map(() => 0);
+        if (spec.voice?.kind === 'jet') this.voicePhases = [0, 0, 0];
 
         this.crank = order.length ? spec.firing[order[0]].angle - 1 : 0;
     }
@@ -270,6 +286,57 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         this.mufflerCutoff += (target - this.mufflerCutoff) * Math.min(1, this.kMuffler * 128);
         this.muffler.lowpass(this.mufflerCutoff, 0.8);
         this.intakeBp.bandpass(250 + this.rpm * 0.12, 0.9);
+
+        const voice = spec.voice;
+        if (voice?.kind === 'electric') this.voiceLp.lowpass(600 + this.load * 3500 + rpmNorm * 2500, 0.9);
+        if (voice?.kind === 'jet') this.voiceLp.lowpass(400 + this.load * 2200 + Math.min(1, this.jetRpm / this.limiter) * 1500, 0.7);
+    }
+
+    /* Partials locked to RPM, fattened and brightened by load */
+    electricSample(rpm: number, rpmNorm: number) {
+        const voice = this.spec.voice as ElectricVoice;
+        this.vibrato += 5.5 / sampleRate;
+        if (this.vibrato > 1) this.vibrato -= 1;
+        const f0 = (voice.baseHz + rpm * voice.hzPerRpm) * (1 + 0.004 * Math.sin(TAU * this.vibrato));
+
+        let tone = 0;
+        for (let i = 0; i < voice.partials.length; i++) {
+            const partial = voice.partials[i];
+            this.voicePhases[i] += f0 * partial.ratio / sampleRate;
+            if (this.voicePhases[i] > 1) this.voicePhases[i] -= 1;
+            const open = partial.ratio <= 1 ? 1 : 0.3 + 0.7 * this.load;
+            tone += Math.sin(TAU * this.voicePhases[i]) * partial.gain * open;
+        }
+        tone = this.voiceLp.process(Math.tanh(tone * (1 + 2 * this.load)));
+
+        this.motorPhase += (300 + rpm * 1.2) / sampleRate;
+        if (this.motorPhase > 1) this.motorPhase -= 1;
+        const whine = Math.sin(TAU * this.motorPhase) * voice.motorWhine * rpmNorm;
+
+        return (tone * (0.35 + 0.65 * this.load) * (0.5 + 0.5 * rpmNorm) + whine) * this.gate * this.duck;
+    }
+
+    /* Turbine spools behind the throttle; roar and afterburner rumble follow load */
+    jetSample(rpm: number, noise: number) {
+        const voice = this.spec.voice as JetVoice;
+        this.jetRpm += (rpm - this.jetRpm) * this.kJet;
+        const n = Math.min(1, this.jetRpm / this.limiter);
+        const f = voice.turbineBase + this.jetRpm * voice.turbineHzPerRpm;
+
+        const ratios = [1, 2.01, 3.97];
+        const gains = [0.6, 0.25, 0.1];
+        let tone = 0;
+        for (let i = 0; i < 3; i++) {
+            this.voicePhases[i] += f * ratios[i] / sampleRate;
+            if (this.voicePhases[i] > 1) this.voicePhases[i] -= 1;
+            tone += Math.sin(TAU * this.voicePhases[i]) * gains[i];
+        }
+        tone *= voice.whine * (0.3 + 0.7 * n);
+
+        const roar = this.voiceLp.process(noise) * voice.roar * (0.15 + 0.85 * this.load) * (0.3 + n);
+        const rumble = this.rumbleLp.process(noise) * voice.rumble * this.load * n * 3;
+
+        return (tone + roar + rumble) * this.gate * this.duck;
     }
 
     process(_inputs: Float32Array[][], outputs: Float32Array[][], params: Record<string, Float32Array>) {
@@ -284,7 +351,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const ignition = params.ignition[0];
         this.starter = params.starter[0];
         /* Key off after the engine ran: the line ticks while it cools */
-        if (this.ignition > 0.5 && ignition < 0.5 && this.rpm > this.idle * 0.5) this.cooling = 1;
+        if (!spec.voice && this.ignition > 0.5 && ignition < 0.5 && this.rpm > this.idle * 0.5) this.cooling = 1;
         if (ignition > 0.5) this.cooling = 0;
         this.ignition = ignition;
         this.cooling *= Math.exp(-left.length / (sampleRate * 9));
@@ -318,6 +385,17 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
 
             const rpm = Math.max(this.rpm, 0);
             const rpmNorm = Math.min(1, rpm / this.limiter);
+
+            if (spec.voice) {
+                /* Powered while the key is on (or the "starter" power-up), ducked on shifts */
+                this.gate += ((this.ignition > 0.5 || this.starter > 0.5 ? 1 : 0) - this.gate) * this.kGate;
+                this.duck += ((this.cut > 0.5 ? 0.35 : 1) - this.duck) * this.kDuck;
+                const v = spec.voice.kind === 'electric'
+                    ? this.electricSample(rpm, rpmNorm)
+                    : this.jetSample(rpm, Math.random() * 2 - 1);
+                left[s] = Math.tanh(this.dcBlock.process(v) * spec.gain);
+                continue;
+            }
 
             /* Advance the crank and fire every event it crosses */
             this.crank += rpm / 60 * 360 / sampleRate;

@@ -22,7 +22,32 @@ export type Resonance = {
     gain: number;
 };
 
+/* Synthetic EV voice (Hyundai N Active Sound+ "Evolution" style): tuned partials following RPM */
+export type ElectricVoice = {
+    kind: 'electric';
+    /* Fundamental = baseHz + rpm * hzPerRpm */
+    baseHz: number;
+    hzPerRpm: number;
+    /* Partials as ratios of the fundamental; upper ones open up with load */
+    partials: { ratio: number; gain: number }[];
+    /* Inverter / e-motor whine level */
+    motorWhine: number;
+};
+
+/* Jet voice ("Supersonic" style): spooling turbine tones over exhaust roar */
+export type JetVoice = {
+    kind: 'jet';
+    /* Turbine tone = turbineBase + rpm * turbineHzPerRpm, lagging like a spool */
+    turbineBase: number;
+    turbineHzPerRpm: number;
+    whine: number;
+    roar: number;
+    rumble: number;
+};
+
 export type EngineSynthSpec = {
+    /* Non-combustion voice; absent means the combustion model below */
+    voice?: ElectricVoice | JetVoice;
     firing: FiringEvent[];
     /* Delay of each bank collector before the merge, in ms */
     bankDelayMs: number[];
