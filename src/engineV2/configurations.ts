@@ -239,3 +239,116 @@ export const amg_v8: EngineConfiguration = {
         gain: 1.1,
     },
 }
+
+/* Hyundai Ioniq 5 N: N Active Sound+ voices over the virtual 8-speed N e-Shift */
+const ioniq5n = {
+    engine: {
+        idle: 800,
+        limiter: 7000,
+        soft_limiter: 6900,
+        limiter_ms: 60,
+        torque: 600,
+        inertia: 1.0,
+    },
+    drivetrain: {
+        shiftTime: 60,
+        damping: 10,
+        /* Close-ratio virtual steps, ~260 km/h in 8th */
+        gears: [5.0, 4.01, 3.22, 2.58, 2.07, 1.66, 1.33, 1.07],
+        final_drive: 3.2,
+    },
+    wheelRadius: 0.363, // 275/35 R21
+}
+
+/* Placeholder combustion settings for voices that don't burn anything */
+const noCombustion: EngineSynthSpec = {
+    firing: [],
+    bankDelayMs: [0],
+    exhaustLength: 1,
+    pulseWidth: 0.4,
+    roughness: 0,
+    resonances: [],
+    muffler: { closed: 1000, open: 1000 },
+    exhaustMix: 0,
+    blockMix: 0,
+    intake: 0,
+    mechanical: 0,
+    crackle: 0,
+    whineTeeth: 0,
+    whine: 0,
+    gain: 1,
+}
+
+// "Ignition": a 2.0 turbo four in the spirit of the Elantra / i30 N, pops included
+export const ioniq_5n_ignition: EngineConfiguration = {
+    label: 'Ioniq 5 N · Ignition',
+    subtitle: 'N Active Sound+ · 2.0 turbo four',
+    ...ioniq5n,
+    synth: {
+        firing: evenFiring(4, [], [0, 0.1, 0.04, 0.14], [0.05, -0.04, 0.03, -0.05]),
+        bankDelayMs: [0],
+        exhaustLength: 3.2,
+        pulseWidth: 0.45,
+        roughness: 0.33,
+        resonances: [
+            { freq: 120, q: 2.4, gain: 0.55 },
+            { freq: 480, q: 3, gain: 0.3 },
+            { freq: 1500, q: 4.5, gain: 0.1 },
+        ],
+        muffler: { closed: 800, open: 3800 },
+        exhaustMix: 1.0,
+        blockMix: 0.3,
+        intake: 0.12,
+        mechanical: 0.04,
+        crackle: 1.0,
+        whineTeeth: 0,
+        whine: 0,
+        turbo: { freq: 5600, whistle: 0.03, blowoff: 0.3 },
+        gain: 1.2,
+    },
+}
+
+// "Evolution": futuristic synth tones that rise with speed
+export const ioniq_5n_evolution: EngineConfiguration = {
+    label: 'Ioniq 5 N · Evolution',
+    subtitle: 'N Active Sound+ · futuristic EV',
+    ...ioniq5n,
+    synth: {
+        ...noCombustion,
+        voice: {
+            kind: 'electric',
+            baseHz: 45,
+            hzPerRpm: 0.05,
+            partials: [
+                { ratio: 0.5, gain: 0.45 },
+                { ratio: 1, gain: 1 },
+                { ratio: 1.5, gain: 0.3 },
+                { ratio: 2, gain: 0.45 },
+                { ratio: 3.01, gain: 0.22 },
+                { ratio: 4.02, gain: 0.1 },
+                { ratio: 6.03, gain: 0.05 },
+            ],
+            motorWhine: 0.025,
+        },
+        gain: 0.6,
+    },
+}
+
+// "Supersonic": fighter-jet turbine and roar
+export const ioniq_5n_supersonic: EngineConfiguration = {
+    label: 'Ioniq 5 N · Supersonic',
+    subtitle: 'N Active Sound+ · fighter jet',
+    ...ioniq5n,
+    synth: {
+        ...noCombustion,
+        voice: {
+            kind: 'jet',
+            turbineBase: 700,
+            turbineHzPerRpm: 0.75,
+            whine: 0.2,
+            roar: 1.6,
+            rumble: 1.0,
+        },
+        gain: 1.35,
+    },
+}
