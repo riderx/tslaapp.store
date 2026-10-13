@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Activity, Gauge, Users, Zap, Volume2, Navigation } from 'lucide-vue-next'
+import { Gauge, Users, Volume2, Navigation } from 'lucide-vue-next'
 
 const router = useRouter()
 
@@ -26,20 +26,6 @@ const apps = [
     icon: Volume2,
     available: true,
     route: '/car-sound'
-  },
-  {
-    id: "stats",
-    name: "Stats",
-    icon: Activity,
-    available: false,
-    comingSoon: true,
-  },
-  {
-    id: "livedata",
-    name: "Live Data",
-    icon: Zap,
-    available: false,
-    comingSoon: true,
   },
   {
     id: "friends",
@@ -97,7 +83,6 @@ const handleAppClick = (appId: string) => {
       >
         <component :is="app.icon" class="app-icon" style="width: 3rem; height: 3rem;" />
         <div class="app-name">{{ app.name }}</div>
-        <div v-if="app.comingSoon" class="coming-soon">COMING SOON</div>
       </div>
     </div>
   </div>
@@ -192,14 +177,5 @@ const handleAppClick = (appId: string) => {
 .app-name {
   font-size: 0.875rem;
   font-weight: 500;
-}
-
-.coming-soon {
-  margin-top: 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--red);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 </style>
