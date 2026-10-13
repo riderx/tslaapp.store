@@ -116,7 +116,7 @@ function update(time: DOMHighResTimeStamp): void {
         drivetrain.omega -= 0.3; // Brakes
     }
     
-    vehicle.update(time, dt);
+    vehicle.update(time, dt, 0, 0);
 }
 
 update(10);

@@ -1,116 +1,90 @@
 import { clamp } from "./util/clamp";
+import { ENGINE_SYNTH_PROCESSOR, type EngineSynthOptions } from "./synth/types";
+import workletUrl from "./synth/engineSynth.worklet.ts?worker&url";
 
-export class DynamicAudioNode {
-    constructor(
-        public gain: GainNode,
-        public audio: AudioBufferSourceNode,
-        public rpm: number = 1000,
-        public volume: number = 1.0,
-    ) {}
-}
-
-export type AudioSource = {
-    source: string;
+export type EngineSoundState = {
     rpm: number;
-    volume?: number;
+    load: number;
+    cut: boolean;
+    gearRatio: number;
 }
 
+/**
+ * Real-time engine voice: one AudioWorklet synthesizing every combustion,
+ * driven by the physics model. No samples are loaded.
+ */
 export class AudioManager {
 
     ctx: AudioContext | null = null;
     volume: GainNode | null = null;
+    node: AudioWorkletNode | null = null;
+    private bassShelf: BiquadFilterNode | null = null;
+    private bassCut: BiquadFilterNode | null = null;
 
-    samples: Record<string, DynamicAudioNode> = {}
     private initId = 0;
 
-    async init(sources: Record<string, AudioSource>) {
+    async init(options: EngineSynthOptions) {
         if (this.ctx)
             return;
 
         const initId = ++this.initId;
-        const ctx = new AudioContext();
+        const ctx = new AudioContext({ latencyHint: 'interactive' });
         const volume = ctx.createGain();
         volume.gain.value = 0.5;
 
-        const samples: Record<string, DynamicAudioNode> = {};
-
         try {
-            for (const key in sources) {
-                if (initId !== this.initId) {
-                    throw new Error('AudioManager init aborted');
-                }
-                samples[key] = await this.createSample(ctx, volume, sources[key]);
-            }
+            await ctx.audioWorklet.addModule(workletUrl);
+            if (initId !== this.initId)
+                throw new Error('AudioManager init aborted');
+
+            const node = new AudioWorkletNode(ctx, ENGINE_SYNTH_PROCESSOR, {
+                numberOfInputs: 0,
+                numberOfOutputs: 1,
+                outputChannelCount: [2],
+                processorOptions: options,
+            });
+            /* Bass protection for cars without a subwoofer, see setSubwoofer() */
+            const bassShelf = ctx.createBiquadFilter();
+            bassShelf.type = 'lowshelf';
+            bassShelf.frequency.value = 160;
+            const bassCut = ctx.createBiquadFilter();
+            bassCut.type = 'highpass';
+            bassCut.Q.value = 0.7;
+            node.connect(bassShelf).connect(bassCut).connect(volume).connect(ctx.destination);
+
+            this.ctx = ctx;
+            this.volume = volume;
+            this.node = node;
+            this.bassShelf = bassShelf;
+            this.bassCut = bassCut;
+            this.setSubwoofer(true);
         } catch (error) {
-            for (const key in samples) {
-                this.teardownSample(samples[key]);
-            }
             try { volume.disconnect(); } catch { /* ignore */ }
             void ctx.close();
-            if (initId === this.initId) {
-                this.ctx = null;
-                this.volume = null;
-                this.samples = {};
-            }
+            if (initId !== this.initId)
+                return;
             throw error;
         }
 
-        if (initId !== this.initId) {
-            for (const key in samples) {
-                this.teardownSample(samples[key]);
-            }
-            try { volume.disconnect(); } catch { /* ignore */ }
-            void ctx.close();
-            return;
-        }
-
-        this.ctx = ctx;
-        this.volume = volume;
-        this.samples = samples;
-
+        /* Without a user gesture resume() stays pending: don't block on it, the page unlocks on first tap */
         if (this.ctx.state === 'suspended')
-            await this.ctx.resume();
+            void this.ctx.resume().catch(() => { /* resumed on next gesture */ });
     }
 
-    private async createSample(
-        ctx: AudioContext,
-        master: GainNode,
-        source: AudioSource,
-    ): Promise<DynamicAudioNode> {
-        const audio = ctx.createBufferSource();
-        const url = source.source.split('/').map(encodeURIComponent).join('/');
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`Failed to load audio: ${source.source} (${response.status})`);
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-        audio.buffer = audioBuffer;
-        audio.loop = true;
-
-        const gain = ctx.createGain();
-        gain.gain.value = 0.0;
-
-        audio
-            .connect(gain)
-            .connect(master)
-            .connect(ctx.destination);
-
-        audio.start();
-
-        return new DynamicAudioNode(
-            gain,
-            audio,
-            source.rpm,
-            source.volume ?? 1.0
-        )
+    update(state: EngineSoundState) {
+        if (!this.node || !this.ctx) return;
+        const p = this.node.parameters;
+        p.get('rpm')!.value = Math.max(0, state.rpm);
+        p.get('load')!.value = clamp(state.load, 0, 1);
+        p.get('cut')!.value = state.cut ? 1 : 0;
+        p.get('gearRatio')!.value = Math.max(0, state.gearRatio);
     }
 
-    private teardownSample(sample: DynamicAudioNode) {
-        try { sample.audio.stop(); } catch { /* already stopped */ }
-        try { sample.audio.disconnect(); } catch { /* ignore */ }
-        try { sample.gain.disconnect(); } catch { /* ignore */ }
+    /* Door speakers alone can't take the low end: shelve it and cut the sub-bass */
+    setSubwoofer(present: boolean) {
+        if (!this.bassShelf || !this.bassCut) return;
+        this.bassShelf.gain.value = present ? 0 : -9;
+        this.bassCut.frequency.value = present ? 20 : 70;
     }
 
     setMasterVolume(value: number) {
@@ -119,30 +93,19 @@ export class AudioManager {
         }
     }
 
-    muteAll() {
-        for (const key in this.samples) {
-            this.samples[key].gain.gain.value = 0;
-        }
-    }
-
-    static crossFade(value: number, start: number, end: number) {
-
-        /* Equal power crossfade */
-        const x = clamp((value - start) / (end - start), 0, 1);
-        const gain1 = Math.cos((1.0 - x) * 0.5 * Math.PI);
-        const gain2 = Math.cos(x * 0.5 * Math.PI);
-
-        return {
-            gain1, gain2
-        }
-    }
-
     public dispose() {
         this.initId++;
-        for (const key in this.samples) {
-            this.teardownSample(this.samples[key]);
+
+        if (this.node) {
+            try { this.node.disconnect(); } catch { /* ignore */ }
+            this.node = null;
         }
-        this.samples = {};
+
+        for (const filter of [this.bassShelf, this.bassCut]) {
+            try { filter?.disconnect(); } catch { /* ignore */ }
+        }
+        this.bassShelf = null;
+        this.bassCut = null;
 
         if (this.volume) {
             try { this.volume.disconnect(); } catch { /* ignore */ }

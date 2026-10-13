@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
-import { Volume2, Settings, X } from 'lucide-vue-next'
+import { Volume2, ChevronRight } from 'lucide-vue-next'
 import { Vehicle } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
@@ -10,7 +10,6 @@ const MANUAL_RETURN_MS = 8000
 
 const vehicle = shallowRef<Vehicle | null>(null)
 const engineReady = ref(false)
-const showSettings = ref(false)
 const errorMessage = ref('')
 
 const rpm = ref(1000)
@@ -28,6 +27,8 @@ const maxRpm = ref(8000)
 const minRpm = ref(1000)
 const sensitivity = ref(55)
 const selectedConfig = ref<keyof typeof configurations>('bac_mono')
+const subwoofer = ref(localStorage.getItem('carSound.subwoofer') !== 'off')
+const driving = ref(false)
 const shiftMode = ref<ShiftMode>('average')
 const autoShiftEnabled = ref(true)
 
@@ -36,11 +37,54 @@ let lastTime = 0
 let watchId: number | null = null
 let manualReturnTimer: ReturnType<typeof setTimeout> | null = null
 
-const shiftModeLabel = computed(() => autoShiftEnabled.value ? 'Auto' : 'Manual')
+/* Road speed (m/s) and acceleration (m/s²) estimated from GPS fixes, predicted between them */
+const BLIP_MS = 350
+let gpsSpeed = 0
+let gpsAccel = 0
+let gpsFixAt = 0
+let roadSpeed = 0
+let blipUntil = 0
+let revHeld = false
+
 const rpmDisplay = computed(() => Math.round(rpm.value).toLocaleString())
 const speedDisplay = computed(() => Math.round(speed.value).toLocaleString())
-const throttleDisplay = computed(() => Math.round(throttle.value * 100))
 const gearDisplay = computed(() => (gear.value === 0 ? 'N' : String(gear.value)))
+const activeConfig = computed(() => configurations[selectedConfig.value] as EngineConfiguration)
+const statusLabel = computed(() => {
+  if (errorMessage.value) return 'Error'
+  if (!engineReady.value) return 'Starting…'
+  if (driving.value) return autoShiftEnabled.value ? 'Driving · Auto' : 'Driving · Manual'
+  return 'Ready · stopped'
+})
+
+/* Tachometer: 270° sweep, one label per 1,000 rpm, red zone from the soft limiter */
+const TACH_R = 170
+const TACH_START = 135
+const TACH_SWEEP = 270
+const tachMax = computed(() => Math.ceil(maxRpm.value / 1000) * 1000)
+const tachPoint = (value: number, r: number) => {
+  const a = ((TACH_START + (TACH_SWEEP * value) / tachMax.value) * Math.PI) / 180
+  return { x: 200 + r * Math.cos(a), y: 200 + r * Math.sin(a) }
+}
+const tachArc = (from: number, to: number, r = TACH_R) => {
+  const a = tachPoint(from, r)
+  const b = tachPoint(to, r)
+  const large = ((to - from) / tachMax.value) * TACH_SWEEP > 180 ? 1 : 0
+  return `M ${a.x} ${a.y} A ${r} ${r} 0 ${large} 1 ${b.x} ${b.y}`
+}
+const redline = computed(() => maxRpm.value * 0.97)
+const tachTicks = computed(() => {
+  const ticks = []
+  for (let v = 0; v <= tachMax.value; v += 500) {
+    const major = v % 1000 === 0
+    const outer = tachPoint(v, TACH_R - 18)
+    const inner = tachPoint(v, TACH_R - (major ? 34 : 26))
+    const label = tachPoint(v, TACH_R - 62)
+    ticks.push({ v, major, outer, inner, label, red: v >= redline.value })
+  }
+  return ticks
+})
+const rpmPercent = computed(() => Math.min(100, Math.max(0, (rpm.value / tachMax.value) * 100)))
 
 const permissionLabel = (status: PermissionStatus) => {
   switch (status) {
@@ -89,16 +133,42 @@ const enterManualMode = () => {
   scheduleAutoReturn()
 }
 
+const setSubwoofer = (present: boolean) => {
+  subwoofer.value = present
+  handleSubwooferChange()
+}
+
+/* Stopped, the steering wheel button blips the throttle; moving, it shifts */
+const blip = () => {
+  blipUntil = performance.now() + BLIP_MS
+}
+
 const shiftUpManual = () => {
   if (!vehicle.value || !engineReady.value) return
+  if (!vehicle.value.driving) return blip()
   enterManualMode()
   vehicle.value.nextGear()
 }
 
 const shiftDownManual = () => {
   if (!vehicle.value || !engineReady.value) return
+  if (!vehicle.value.driving) return blip()
   enterManualMode()
   vehicle.value.prevGear()
+}
+
+const startRev = () => {
+  revHeld = true
+  void resumeAudioIfNeeded()
+}
+
+const stopRev = () => {
+  revHeld = false
+}
+
+const handleSubwooferChange = () => {
+  localStorage.setItem('carSound.subwoofer', subwoofer.value ? 'on' : 'off')
+  vehicle.value?.audio.setSubwoofer(subwoofer.value)
 }
 
 const selectShiftMode = (mode: ShiftMode) => {
@@ -131,6 +201,21 @@ const handleMotion = (event: DeviceMotionEvent) => {
   acceleration.value = event.acceleration.y || 0
 }
 
+/* Longitudinal acceleration: GPS, sharpened by the accelerometer when it reports something */
+const currentAccel = () => {
+  const sensor = accelerometerStatus.value === 'allowed' ? acceleration.value : 0
+  const accel = Math.abs(sensor) > 0.2 ? (gpsAccel + sensor) / 2 : gpsAccel
+  return accel * (sensitivity.value / 55)
+}
+
+/* Speed between fixes: extrapolate the last fix for half a second at most */
+const currentSpeed = (now: number, dt: number) => {
+  const since = gpsFixAt ? Math.min((now - gpsFixAt) / 1000, 0.5) : 0
+  const predicted = Math.max(0, gpsSpeed + gpsAccel * since)
+  roadSpeed += (predicted - roadSpeed) * (1 - Math.exp(-dt / 0.15))
+  return roadSpeed
+}
+
 const startWatchingPosition = () => {
   if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId)
@@ -142,7 +227,8 @@ const startWatchingPosition = () => {
 
   watchId = navigator.geolocation.watchPosition(
     (position) => {
-      const now = Date.now()
+      const now = performance.now()
+      let kmh = speed.value
       if (lastPosition && lastStamp) {
         const distance = calculateDistance(
           lastPosition.coords.latitude,
@@ -151,12 +237,26 @@ const startWatchingPosition = () => {
           position.coords.longitude,
         )
         const timeDiff = (now - lastStamp) / 3600000
-        if (timeDiff > 0) speed.value = distance / timeDiff
+        if (timeDiff > 0) kmh = distance / timeDiff
       }
       // Prefer native speed when available (m/s -> km/h)
       if (typeof position.coords.speed === 'number' && !Number.isNaN(position.coords.speed) && position.coords.speed >= 0) {
-        speed.value = position.coords.speed * 3.6
+        kmh = position.coords.speed * 3.6
       }
+
+      /* Acceleration from successive fixes, smoothed: GPS speed is noisy at 1-10 Hz */
+      const next = kmh / 3.6
+      const fixDt = gpsFixAt ? (now - gpsFixAt) / 1000 : 0
+      if (fixDt > 0.05 && fixDt < 3) {
+        const raw = Math.max(-12, Math.min(12, (next - gpsSpeed) / fixDt))
+        gpsAccel += (raw - gpsAccel) * Math.min(1, fixDt / 0.35)
+      } else {
+        gpsAccel = 0
+      }
+      gpsSpeed = next
+      gpsFixAt = now
+      speed.value = kmh
+
       lastPosition = position
       lastStamp = now
     },
@@ -273,27 +373,12 @@ const handleMediaKeyDown = (e: KeyboardEvent) => {
   }
 }
 
-const updateThrottle = () => {
-  if (!vehicle.value) return
-
-  let newThrottle = 0
-
-  if (geolocationStatus.value === 'allowed') {
-    // Map ~0-120 km/h to throttle for EV movement sound
-    newThrottle = Math.max(newThrottle, Math.min(speed.value / 120, 1) * 0.85)
-  }
-
-  if (accelerometerStatus.value === 'allowed') {
-    const forward = Math.max(acceleration.value, 0)
-    const accelFactor = Math.min(forward / 3.5, 1)
-    if (accelFactor > 0.04) {
-      newThrottle = Math.max(newThrottle, accelFactor * (sensitivity.value / 100))
-    }
-  }
-
-  const target = Math.min(Math.max(newThrottle, 0), 1)
+/* Parked: throttle only from blips and the rev button */
+const updateParkedThrottle = (now: number) => {
+  if (!vehicle.value || vehicle.value.driving) return
+  const target = revHeld || now < blipUntil ? 1 : 0
   const current = vehicle.value.engine.throttle
-  vehicle.value.engine.throttle = current + (target - current) * 0.18
+  vehicle.value.engine.throttle = current + (target - current) * (target > current ? 0.5 : 0.25)
 }
 
 const startUpdateLoop = () => {
@@ -312,13 +397,13 @@ const startUpdateLoop = () => {
     lastTime = time
 
     if (dt > 0) {
-      updateThrottle()
-      vehicle.value.update(time, Math.min(dt, 0.033))
+      const step = Math.min(dt, 0.033)
+      updateParkedThrottle(time)
+      vehicle.value.update(time, step, currentSpeed(time, step), currentAccel())
       rpm.value = vehicle.value.engine.rpm
-      throttle.value = vehicle.value.engine.throttle
-      if (!vehicle.value.drivetrain.isShifting) {
-        gear.value = vehicle.value.drivetrain.gear
-      }
+      throttle.value = vehicle.value.load
+      gear.value = vehicle.value.drivetrain.gear
+      driving.value = vehicle.value.driving
     }
 
     animationId = requestAnimationFrame(update)
@@ -338,6 +423,7 @@ const initVehicle = async () => {
     minRpm.value = config.engine.idle || 1000
     rpm.value = next.engine.rpm
     updateVolume()
+    next.audio.setSubwoofer(subwoofer.value)
     syncAutoShift()
   } catch (error) {
     console.error('Failed to initialize vehicle:', error)
@@ -353,6 +439,12 @@ const teardownEngine = () => {
     animationId = null
   }
   lastTime = 0
+  revHeld = false
+  blipUntil = 0
+  gpsSpeed = 0
+  gpsAccel = 0
+  gpsFixAt = 0
+  roadSpeed = 0
   clearManualReturnTimer()
   unbindMediaKeys()
   stopAccelerometer()
@@ -380,7 +472,7 @@ const bootEngine = async () => {
       return
     }
 
-    await resumeAudioIfNeeded()
+    void resumeAudioIfNeeded()
     updateVolume()
     autoShiftEnabled.value = true
     syncAutoShift()
@@ -420,389 +512,523 @@ watch(shiftMode, () => syncAutoShift())
 </script>
 
 <template>
-  <div class="car-sound-container">
-    <div class="tesla-header">
-      <div class="back-button" @click="$router.go(-1)">
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <div class="car-sound">
+    <header class="topbar">
+      <button class="icon-button" aria-label="Back" @click="$router.go(-1)">
+        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M19 12H5M12 19l-7-7 7-7"/>
         </svg>
-      </div>
-      <h1 class="tesla-title">Car Sound</h1>
-      <div class="settings-button" @click="showSettings = !showSettings">
-        <Settings />
-      </div>
-    </div>
+      </button>
+      <span class="wordmark">CAR SOUND</span>
+      <span class="status" :class="{ live: engineReady && !errorMessage, error: !!errorMessage }">
+        <span class="status-dot"></span>{{ statusLabel }}
+      </span>
+    </header>
 
-    <div class="sound-display">
-      <div class="mode-row">
-        <div class="mode-pill" :class="{ manual: !autoShiftEnabled }">
-          {{ shiftModeLabel }}
-          <span v-if="!autoShiftEnabled" class="mode-hint-inline">· next/prev gear · auto soon</span>
-        </div>
-      </div>
-
-      <div class="dashboard">
-        <div class="gauge rpm-gauge">
-          <div class="gauge-label">RPM</div>
-          <div class="gauge-value">{{ rpmDisplay }}</div>
-          <div class="gauge-bar">
-            <div class="gauge-fill" :style="{ width: `${Math.max(0, Math.min(100, ((rpm - minRpm) / Math.max(maxRpm - minRpm, 1)) * 100))}%` }"></div>
-          </div>
-        </div>
-
-        <div class="gauge speed-gauge">
-          <div class="gauge-label">SPEED</div>
-          <div class="gauge-value">{{ speedDisplay }} <span class="gauge-unit">km/h</span></div>
-          <div class="gauge-bar">
-            <div class="gauge-fill" :style="{ width: `${Math.min(speed / 200, 1) * 100}%` }"></div>
-          </div>
-        </div>
-
-        <div class="gauge throttle-gauge">
-          <div class="gauge-label">LOAD</div>
-          <div class="gauge-value">{{ throttleDisplay }}<span class="gauge-unit">%</span></div>
-          <div class="gauge-bar">
-            <div class="gauge-fill" :style="{ width: `${throttle * 100}%` }"></div>
-          </div>
-        </div>
-
-        <div class="gauge gear-gauge">
-          <div class="gauge-label">GEAR</div>
-          <div class="gauge-value gear-display">{{ gearDisplay }}</div>
-        </div>
-      </div>
-
-      <p class="help-text">
-        Engine runs while this page is open. Sound follows movement (GPS + accel). Steering next/prev changes gear (manual), then returns to Auto.
-      </p>
-
-      <div class="controls">
-        <div class="volume-control">
-          <Volume2 class="volume-icon" />
-          <input
-            type="range"
-            min="0"
-            max="100"
-            :value="volume"
-            @input="handleVolumeChange"
-            class="volume-slider"
+    <main class="layout">
+      <section class="tach-wrap">
+        <svg class="tach" viewBox="0 0 400 400" role="img" :aria-label="`${rpmDisplay} rpm, gear ${gearDisplay}, ${speedDisplay} km/h`">
+          <path class="tach-track" :d="tachArc(0, tachMax)" />
+          <path class="tach-red" :d="tachArc(redline, tachMax)" />
+          <path
+            class="tach-fill"
+            :class="{ hot: rpm >= redline }"
+            :d="tachArc(0, tachMax)"
+            pathLength="100"
+            stroke-dasharray="100 100"
+            :stroke-dashoffset="100 - rpmPercent"
           />
-        </div>
+          <g v-for="tick in tachTicks" :key="tick.v">
+            <line
+              class="tach-tick"
+              :class="{ major: tick.major, red: tick.red }"
+              :x1="tick.inner.x" :y1="tick.inner.y" :x2="tick.outer.x" :y2="tick.outer.y"
+            />
+            <text
+              v-if="tick.major"
+              class="tach-label"
+              :class="{ red: tick.red }"
+              :x="tick.label.x" :y="tick.label.y"
+              text-anchor="middle" dominant-baseline="central"
+            >{{ tick.v / 1000 }}</text>
+          </g>
 
-        <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
-        <p v-else-if="!engineReady" class="help-text">Starting engine…</p>
+          <text class="tach-gear" x="200" y="172" text-anchor="middle" dominant-baseline="central">{{ gearDisplay }}</text>
+          <text class="tach-caption" x="200" y="246" text-anchor="middle">Gear</text>
+          <rect class="load-track" x="140" y="260" width="120" height="6" rx="3" />
+          <rect class="load-fill" x="140" y="260" :width="120 * throttle" height="6" rx="3" />
+          <text class="tach-caption" x="200" y="286" text-anchor="middle">Load</text>
 
-        <div class="shift-modes">
-          <button
-            v-for="mode in SHIFT_MODE_LIST"
-            :key="mode.id"
-            class="mode-button"
-            :class="{ active: shiftMode === mode.id }"
-            @click="selectShiftMode(mode.id)"
-          >
-            {{ mode.label }}
-          </button>
-        </div>
-      </div>
-    </div>
+          <text class="tach-speed" x="200" y="332" text-anchor="middle" dominant-baseline="central">{{ speedDisplay }}</text>
+          <text class="tach-caption" x="200" y="370" text-anchor="middle">km/h · {{ rpmDisplay }} rpm</text>
+        </svg>
+      </section>
 
-    <div class="settings-panel" v-if="showSettings">
-      <div class="settings-header">
-        <h2 class="settings-title">Settings</h2>
-        <button class="close-button" @click="showSettings = false"><X /></button>
-      </div>
-
-      <div class="settings-group">
-        <label class="settings-label">
-          <span>Engine</span>
-          <select v-model="selectedConfig" @change="handleConfigChange" class="settings-select">
-            <option value="bac_mono">BAC Mono</option>
-            <option value="ferr_458">Ferrari 458</option>
-            <option value="procar">Procar</option>
+      <aside class="panel">
+        <label class="car-card">
+          <span class="car-text">
+            <span class="car-name">{{ activeConfig.label }}</span>
+            <span class="car-sub">{{ activeConfig.subtitle }}</span>
+          </span>
+          <ChevronRight class="car-chevron" />
+          <select v-model="selectedConfig" class="car-select" aria-label="Engine" @change="handleConfigChange">
+            <option v-for="(config, key) in configurations" :key="key" :value="key">{{ config.label }}</option>
           </select>
         </label>
 
-        <label class="settings-label">
-          <span>Accel sensitivity: {{ sensitivity }}%</span>
-          <input type="range" min="0" max="100" v-model.number="sensitivity" class="settings-slider" />
-        </label>
-      </div>
+        <div class="row">
+          <span class="row-label">Shifting</span>
+          <div class="segmented">
+            <button
+              v-for="mode in SHIFT_MODE_LIST"
+              :key="mode.id"
+              :class="{ active: shiftMode === mode.id }"
+              @click="selectShiftMode(mode.id)"
+            >{{ mode.label }}</button>
+          </div>
+        </div>
 
-      <div class="permissions-info">
-        <div class="permission-item" :class="geolocationStatus">GPS: {{ permissionLabel(geolocationStatus) }}</div>
-        <div class="permission-item" :class="accelerometerStatus">Accelerometer: {{ permissionLabel(accelerometerStatus) }}</div>
-      </div>
-    </div>
+        <div class="row">
+          <span class="row-label">Speakers</span>
+          <div class="segmented">
+            <button :class="{ active: subwoofer }" @click="setSubwoofer(true)">Subwoofer</button>
+            <button :class="{ active: !subwoofer }" @click="setSubwoofer(false)">Doors only</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <span class="row-label"><Volume2 class="row-icon" /> Volume</span>
+          <input type="range" min="0" max="100" :value="volume" class="slider" aria-label="Volume" @input="handleVolumeChange" />
+        </div>
+
+        <div class="row">
+          <span class="row-label">Response</span>
+          <input type="range" min="0" max="100" v-model.number="sensitivity" class="slider" aria-label="Acceleration sensitivity" />
+        </div>
+
+        <div class="sensors">
+          <span :class="geolocationStatus">GPS · {{ permissionLabel(geolocationStatus) }}</span>
+          <span :class="accelerometerStatus">Motion · {{ permissionLabel(accelerometerStatus) }}</span>
+        </div>
+
+        <p v-if="errorMessage" class="hint error-text">{{ errorMessage }}</p>
+        <p v-else class="hint">
+          <template v-if="driving">RPM follows your speed through the gearbox, load follows acceleration. Steering wheel next/prev shifts.</template>
+          <template v-else>Stopped: steering wheel next/prev blips the throttle. Drive off and the engine follows the car.</template>
+        </p>
+
+        <div class="actions">
+          <template v-if="driving">
+            <button class="action secondary" @click="shiftDownManual">Gear −</button>
+            <button class="action secondary" @click="shiftUpManual">Gear +</button>
+          </template>
+          <button
+            v-else
+            class="action"
+            :disabled="!engineReady"
+            @pointerdown.prevent="startRev"
+            @pointerup="stopRev"
+            @pointerleave="stopRev"
+            @pointercancel="stopRev"
+          >
+            {{ engineReady ? 'Hold to rev' : 'Starting…' }}
+          </button>
+        </div>
+      </aside>
+    </main>
   </div>
 </template>
 
 <style scoped>
-.car-sound-container {
+/* Night by default (the rest of the app is dark), day when the car says it's day */
+.car-sound {
+  --bg: #0c0c0d;
+  --fg: #f4f4f5;
+  --muted: #8b8b90;
+  --line: #232326;
+  --track: #2a2a2e;
+  --panel: #19191b;
+  --seg-active: #34343a;
+  --action-bg: #f4f4f5;
+  --action-fg: #0c0c0d;
+  --red: #e5252b;
+  --accent: #c8a15a;
+
   min-height: 100vh;
-  background-color: black;
-  color: white;
-  padding: 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Montserrat, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   display: flex;
   flex-direction: column;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.tesla-header {
+@media (prefers-color-scheme: light) {
+  .car-sound {
+    --bg: #f4f4f4;
+    --fg: #111112;
+    --muted: #8a8a8e;
+    --line: #e2e2e2;
+    --track: #e0e0e0;
+    --panel: #e9e9ea;
+    --seg-active: #ffffff;
+    --action-bg: #111112;
+    --action-fg: #ffffff;
+  }
+}
+
+.topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1.25rem;
+  gap: 1.25rem;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid var(--line);
 }
 
-.back-button,
-.settings-button,
-.close-button {
+.icon-button {
+  display: grid;
+  place-items: center;
   width: 2.5rem;
   height: 2.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  border-radius: 50%;
-  background-color: rgba(255, 255, 255, 0.1);
-  border: none;
-  color: white;
+  border-radius: 999px;
+  color: var(--fg);
 }
 
-.tesla-title {
-  font-size: 1.25rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+.icon-button:active {
+  background: var(--panel);
 }
 
-.mode-row {
-  margin-bottom: 1rem;
+.wordmark {
+  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0.45em;
+  font-size: 0.95rem;
 }
 
-.mode-pill {
+.status {
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  border-radius: 999px;
-  background: rgba(232, 33, 39, 0.2);
-  border: 1px solid rgba(232, 33, 39, 0.5);
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
-.mode-pill.manual {
-  background: rgba(243, 156, 18, 0.2);
-  border-color: rgba(243, 156, 18, 0.55);
-}
-
-.mode-hint-inline {
-  font-weight: 500;
-  opacity: 0.8;
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.dashboard {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-}
-
-.gauge {
-  background-color: rgba(255, 255, 255, 0.05);
-  border-radius: 0.5rem;
-  padding: 1rem;
-}
-
-.gauge-label {
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.6);
-  margin-bottom: 0.25rem;
-  letter-spacing: 0.05em;
-}
-
-.gauge-value {
-  font-size: 2rem;
-  font-weight: 600;
-  margin-bottom: 0.75rem;
-}
-
-.gauge-unit {
-  font-size: 1rem;
-  opacity: 0.7;
-}
-
-.gauge-bar {
+.status-dot {
+  width: 0.5rem;
   height: 0.5rem;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 0.25rem;
-  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
 }
 
-.gauge-fill {
-  height: 100%;
-  border-radius: 0.25rem;
-  transition: width 0.15s ease;
+.status.live .status-dot {
+  background: var(--accent);
 }
 
-.rpm-gauge .gauge-fill { background-color: #e82127; }
-.speed-gauge .gauge-fill { background-color: #3498db; }
-.throttle-gauge .gauge-fill { background-color: #f39c12; }
-
-.gear-gauge { text-align: center; }
-.gear-display {
-  font-size: 3rem !important;
-  font-weight: 700;
-  color: #e82127;
-  margin-bottom: 0 !important;
+.status.error .status-dot {
+  background: var(--red);
 }
 
-.help-text {
-  margin: 1rem 0 0;
-  font-size: 0.8rem;
-  color: rgba(255, 255, 255, 0.55);
-  line-height: 1.4;
-}
-
-.controls { margin-top: 1.5rem; }
-
-.volume-control {
-  display: flex;
-  align-items: center;
-  margin-bottom: 1.25rem;
-  gap: 1rem;
-}
-
-.volume-icon { width: 1.5rem; height: 1.5rem; }
-
-.volume-slider {
+.layout {
   flex: 1;
-  height: 0.25rem;
-  -webkit-appearance: none;
-  appearance: none;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 0.125rem;
-  outline: none;
-}
-
-.volume-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 1rem;
-  height: 1rem;
-  border-radius: 50%;
-  background-color: white;
-  cursor: pointer;
-}
-
-.error-message {
-  margin-top: 0.75rem;
-  color: #e82127;
-  font-size: 0.875rem;
-  text-align: center;
-}
-
-.shift-modes {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.5rem;
-  margin-top: 1rem;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 2rem;
+  padding: 1.25rem 1.5rem 1.5rem;
 }
 
-.mode-button {
-  padding: 0.65rem 0.25rem;
-  background-color: rgba(255, 255, 255, 0.06);
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 0.5rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
+.tach-wrap {
+  display: grid;
+  place-items: center;
+  min-height: 0;
 }
 
-.mode-button.active {
-  background-color: rgba(232, 33, 39, 0.35);
-  border-color: #e82127;
+.tach {
+  width: min(100%, 72vh);
+  height: auto;
+  font-family: inherit;
+  user-select: none;
 }
 
-.settings-panel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 85%;
-  max-width: 400px;
-  background-color: #1a1a1a;
-  box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-  padding: 2rem 1.5rem;
-  z-index: 100;
-  overflow-y: auto;
+.tach-track,
+.tach-fill,
+.tach-red {
+  fill: none;
+  stroke-linecap: round;
 }
 
-.settings-header {
+.tach-track {
+  stroke: var(--track);
+  stroke-width: 12;
+}
+
+.tach-red {
+  stroke: var(--red);
+  stroke-width: 12;
+  opacity: 0.3;
+}
+
+.tach-fill {
+  stroke: var(--fg);
+  stroke-width: 12;
+}
+
+.tach-fill.hot {
+  stroke: var(--red);
+}
+
+.tach-tick {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  opacity: 0.6;
+}
+
+.tach-tick.major {
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.tach-tick.red,
+.tach-label.red {
+  stroke: var(--red);
+  fill: var(--red);
+}
+
+.tach-label {
+  fill: var(--muted);
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.tach-gear {
+  fill: var(--fg);
+  font-size: 118px;
+  font-weight: 700;
+}
+
+.tach-caption {
+  fill: var(--muted);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.load-track {
+  fill: var(--track);
+}
+
+.load-fill {
+  fill: var(--fg);
+}
+
+.tach-speed {
+  fill: var(--fg);
+  font-size: 58px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.car-card {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1.5rem;
-}
-
-.settings-title { font-size: 1.25rem; font-weight: 600; }
-
-.settings-group {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  margin-bottom: 1.5rem;
-}
-
-.settings-label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  font-size: 0.875rem;
-}
-
-.settings-select,
-.settings-slider {
-  width: 100%;
-}
-
-.settings-select {
-  background: #111;
-  color: white;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 0.4rem;
-  padding: 0.6rem;
-}
-
-.settings-slider {
-  height: 0.25rem;
-  -webkit-appearance: none;
-  appearance: none;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 0.125rem;
-}
-
-.settings-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 1rem;
-  height: 1rem;
-  border-radius: 50%;
-  background-color: white;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border-radius: 14px;
+  background: var(--panel);
   cursor: pointer;
 }
 
-.permissions-info {
+.car-text {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  font-size: 0.8rem;
+  gap: 0.2rem;
+  flex: 1;
+  min-width: 0;
 }
 
-.permission-item { color: rgba(255, 255, 255, 0.55); }
-.permission-item.allowed { color: #2ecc71; }
-.permission-item.pending { color: #f39c12; }
-.permission-item.denied { color: #e82127; }
+.car-name {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.car-sub {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.car-chevron {
+  width: 1.2rem;
+  height: 1.2rem;
+  color: var(--muted);
+}
+
+/* Native picker over the whole card: big target, system list in the car */
+.car-select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3rem;
+}
+
+.row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.row-icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+.segmented {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.segmented button {
+  flex: 1;
+  padding: 0.65rem 0.4rem;
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.segmented button.active {
+  background: var(--seg-active);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.slider {
+  width: 100%;
+  height: 2.75rem;
+  accent-color: var(--fg);
+}
+
+.sensors {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.sensors .allowed::before,
+.sensors .denied::before,
+.sensors .pending::before,
+.sensors .off::before {
+  content: '';
+  display: inline-block;
+  width: 0.45rem;
+  height: 0.45rem;
+  margin-right: 0.4rem;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.sensors .allowed::before {
+  background: #34c759;
+}
+
+.sensors .denied::before {
+  background: var(--red);
+}
+
+.sensors .pending::before {
+  background: var(--accent);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.error-text {
+  color: var(--red);
+}
+
+.actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: auto;
+  padding-top: 1rem;
+}
+
+.action {
+  flex: 1;
+  padding: 1.15rem;
+  border-radius: 12px;
+  background: var(--action-bg);
+  color: var(--action-fg);
+  font-size: 1.1rem;
+  font-weight: 600;
+  touch-action: none;
+  user-select: none;
+  transition: transform 0.1s ease, opacity 0.15s ease;
+}
+
+.action:active {
+  transform: scale(0.98);
+}
+
+.action:disabled {
+  opacity: 0.5;
+}
+
+.action.secondary {
+  background: var(--panel);
+  color: var(--fg);
+}
+
+@media (max-width: 860px) {
+  .layout {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    padding: 1rem;
+  }
+
+  .tach {
+    width: min(100%, 420px);
+  }
+
+  .status {
+    margin-left: auto;
+  }
+
+  .wordmark {
+    letter-spacing: 0.3em;
+  }
+}
+
+@media (min-width: 861px) {
+  .status {
+    margin-left: 0;
+  }
+}
 </style>
