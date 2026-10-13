@@ -1,4 +1,3 @@
-import { AudioManager, DynamicAudioNode } from "./AudioManager";
 import { Drivetrain } from "./Drivetrain";
 import { ratio } from "./util/ratio";
 
@@ -134,43 +133,5 @@ export class Engine {
         const w = corr * corr * 1/this.inertia; // idk?
         const dlambda = -corr / (w + compliance / h / h);
         return corr * -dlambda;
-    }
-
-    applySounds(samples: Record<string, DynamicAudioNode>, gearRatio = 0, rpmPitchFactor = 0.2) {
-        
-        const { gain1: high, gain2: low } = AudioManager.crossFade(this.rpm, 3000, 6500);
-        const { gain1: on, gain2: off } = AudioManager.crossFade(this.throttle, 0, 1);
-        const limiterGain = ratio(this.rpm, this.soft_limiter * 0.93, this.limiter);
-
-        const applySample = (key: string, gain: number, applyPitch: boolean = true) => {
-            if (!samples[key]) {
-                return;
-            }
-
-            if (applyPitch) {
-                samples[key].audio.detune.value = this.getRPMPitch(samples[key].rpm, rpmPitchFactor);
-            }
-
-            samples[key].gain.gain.value = gain * (samples[key].volume ?? 1);
-        };
-
-        applySample('on_low', on * low);
-        applySample('off_low', off * low);
-        applySample('on_high', on * high);
-        applySample('off_high', off * high);
-        applySample('limiter', limiterGain, false);
-
-        /* TRANSMISSION */
-        if (samples['tranny_on'] && samples['tranny_off']) {
-            samples['tranny_on'].audio.detune.value = this.rpm * gearRatio * 0.05 - 100;
-            samples['tranny_on'].gain.gain.value = gearRatio > 0 ? on * (samples['tranny_on'].volume ?? 1) : 0;
-            
-            samples['tranny_off'].audio.detune.value = this.rpm * gearRatio * 0.035 - 800;
-            samples['tranny_off'].gain.gain.value = gearRatio > 0 ? off * (samples['tranny_off'].volume ?? 1) : 0;
-        }
-    }
-
-    getRPMPitch(sampleRPM: number, rpmPitchFactor: number) {
-        return (this.rpm - sampleRPM) * rpmPitchFactor
     }
 }
