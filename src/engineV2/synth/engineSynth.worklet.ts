@@ -99,10 +99,13 @@ const onePole = (seconds: number) => 1 - Math.exp(-1 / (sampleRate * seconds));
 class EngineSynthProcessor extends AudioWorkletProcessor {
     static get parameterDescriptors() {
         return [
-            { name: 'rpm', defaultValue: 1000, minValue: 0, maxValue: 20000, automationRate: 'k-rate' },
+            { name: 'rpm', defaultValue: 0, minValue: 0, maxValue: 20000, automationRate: 'k-rate' },
             { name: 'load', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
             { name: 'cut', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
             { name: 'gearRatio', defaultValue: 0, minValue: 0, maxValue: 10, automationRate: 'k-rate' },
+            /* Key position: fuel and spark on, starter motor engaged */
+            { name: 'ignition', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
+            { name: 'starter', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' },
         ];
     }
 
@@ -115,6 +118,8 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
     load = 0;
     cut = 0;
     gearRatio = 0;
+    ignition = 0;
+    starter = 0;
 
     /* Crank */
     crank = 0;
@@ -155,6 +160,15 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
     /* Gearbox */
     whinePhase = 0;
 
+    /* Starter motor */
+    starterPhase = 0;
+    starterBp = new Biquad();
+
+    /* Exhaust cooling down after shutdown: sparse metallic ticks */
+    cooling = 0;
+    tickEnv = 0;
+    tickBp = new Biquad();
+
     /* Output */
     dcBlock = new Biquad();
     kRpm = onePole(0.025);
@@ -169,7 +183,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         this.spec = spec;
         this.idle = idle;
         this.limiter = limiter;
-        this.rpm = idle;
+        this.rpm = 0;
 
         const order = spec.firing.map((_, i) => i).sort((a, b) => spec.firing[a].angle - spec.firing[b].angle);
         this.firingOrder = order;
@@ -194,6 +208,8 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         this.popLp.lowpass(2600, 0.7);
         this.blowoffBp.bandpass(2400, 1.2);
         this.dcBlock.highpass(32, 0.7);
+        this.starterBp.bandpass(1400, 0.9);
+        this.tickBp.bandpass(4200, 6);
 
         this.crank = order.length ? spec.firing[order[0]].angle - 1 : 0;
     }
@@ -210,7 +226,10 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const jitter = (Math.random() * 2 - 1) * (0.06 + 0.12 * (1 - rpmNorm));
 
         let amp: number;
-        if (this.cut > 0.5 && Math.random() < 0.85) {
+        if (this.ignition < 0.5) {
+            /* No fuel, no spark: compression only (cranking, spinning down) */
+            amp = 0.05;
+        } else if (this.cut > 0.5 && Math.random() < 0.85) {
             /* Ignition cut: rev limiter or shift */
             amp = 0.04;
             if (Math.random() < 5 * spec.crackle * perFiring) this.pop(0.5 + Math.random() * 0.5);
@@ -262,6 +281,13 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const rpmTarget = params.rpm[0];
         const loadTarget = params.load[0];
         this.cut = params.cut[0];
+        const ignition = params.ignition[0];
+        this.starter = params.starter[0];
+        /* Key off after the engine ran: the line ticks while it cools */
+        if (this.ignition > 0.5 && ignition < 0.5 && this.rpm > this.idle * 0.5) this.cooling = 1;
+        if (ignition > 0.5) this.cooling = 0;
+        this.ignition = ignition;
+        this.cooling *= Math.exp(-left.length / (sampleRate * 9));
         const gearTarget = params.gearRatio[0];
 
         /* Lift-off at speed arms the overrun crackle, which fades after a few seconds */
@@ -282,6 +308,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const pulses = this.pulses;
         const bankBus = this.bankBus;
         const blowoffDecay = Math.exp(-1 / (sampleRate * 0.35));
+        const tickDecay = Math.exp(-1 / (sampleRate * 0.004));
         const turbo = spec.turbo;
 
         for (let s = 0; s < left.length; s++) {
@@ -350,8 +377,24 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
             const blockOut = this.blockLp.process(this.blockHp.process(block));
             this.pulseEnv += (Math.abs(block) - this.pulseEnv) * 0.002;
             const noise = Math.random() * 2 - 1;
-            const intake = this.intakeBp.process(noise) * spec.intake * this.load * (0.3 + rpmNorm);
-            const mech = this.mechBp.process(noise) * spec.mechanical * (0.2 + this.pulseEnv * 2) * (0.3 + rpmNorm);
+            const spinning = Math.min(1, rpm / 400);
+            const intake = this.intakeBp.process(noise) * spec.intake * this.load * (0.3 + rpmNorm) * spinning;
+            const mech = this.mechBp.process(noise) * spec.mechanical * (0.2 + this.pulseEnv * 2) * (0.3 + rpmNorm) * spinning;
+
+            /* Starter: pinion whine rising with crank speed, plus gear grind */
+            let starter = 0;
+            if (this.starter > 0.001) {
+                this.starterPhase += (160 + rpm * 1.3) / sampleRate;
+                if (this.starterPhase > 1) this.starterPhase -= 1;
+                starter = (Math.tanh(Math.sin(TAU * this.starterPhase) * 3) * 0.09 + this.starterBp.process(noise) * 0.06) * this.starter;
+            }
+
+            let tick = 0;
+            if (this.cooling > 0.01) {
+                if (Math.random() < this.cooling * 3 / sampleRate) this.tickEnv = 0.12 + Math.random() * 0.25 * this.cooling;
+                tick = this.tickBp.process(noise) * this.tickEnv;
+                this.tickEnv *= tickDecay;
+            }
 
             /* Turbo whistle follows boost, blow-off valve on lift */
             let turboOut = 0;
@@ -374,7 +417,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
                 ? Math.sin(TAU * this.whinePhase) * spec.whine * rpmNorm * (0.4 + 0.6 * this.load)
                 : 0;
 
-            let y = exhaust * spec.exhaustMix + blockOut * spec.blockMix + intake + mech + turboOut + whine;
+            let y = exhaust * spec.exhaustMix + blockOut * spec.blockMix + intake + mech + turboOut + whine + starter + tick;
             y = this.dcBlock.process(y) * spec.gain;
             left[s] = Math.tanh(y);
         }
