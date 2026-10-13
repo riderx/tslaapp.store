@@ -4,6 +4,7 @@ import { closeTracks, createSession, newTracks, renegotiate, sfuConfigured } fro
 import { getUserLocation, notifyUser, PresenceHub } from './presence'
 import { callRoomStub, CallRoom } from './call-room'
 import { computeNavRoute } from './nav-route'
+import { handleTeslaApi, handleTeslaCallback, pollDueVehicles, teslaPublicKey } from './tesla'
 
 export { PresenceHub, CallRoom }
 
@@ -15,6 +16,10 @@ export default {
     const url = new URL(request.url)
 
     try {
+      if (url.pathname === '/.well-known/appspecific/com.tesla.3p.public-key.pem') {
+        return teslaPublicKey(env)
+      }
+
       if (url.pathname === '/ws') {
         return handleWs(request, env, url)
       }
@@ -31,6 +36,10 @@ export default {
       const message = err instanceof Error ? err.message : 'Server error'
       return json({ error: message }, 500)
     }
+  },
+
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(pollDueVehicles(env))
   },
 }
 
@@ -74,6 +83,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
   }
 
+  if (path === '/api/tesla/callback' && request.method === 'GET') {
+    return handleTeslaCallback(request, env, url)
+  }
+
   if (path === '/api/health' && request.method === 'GET') {
     return json({ ok: true, sfu: sfuConfigured(env) })
   }
@@ -115,6 +128,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       user: { id: user.id, name: user.name, friendCode: user.friend_code },
       sfu: sfuConfigured(env),
     })
+  }
+
+  if (path.startsWith('/api/tesla/')) {
+    return handleTeslaApi(request, env, url, path, user)
   }
 
   if (path === '/api/friends' && request.method === 'GET') {

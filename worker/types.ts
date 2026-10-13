@@ -7,6 +7,15 @@ export interface Env {
   CALLS_APP_SECRET: string
   /** Server-side Google key for traffic-aware nav routing */
   GOOGLE_MAPS_API_KEY?: string
+  /** Tesla Fleet API app (developer.tesla.com) */
+  TESLA_CLIENT_ID?: string
+  TESLA_CLIENT_SECRET?: string
+  /** Override OAuth redirect (defaults to <origin>/api/tesla/callback) */
+  TESLA_REDIRECT_URI?: string
+  /** EC public key PEM served at /.well-known for partner registration */
+  TESLA_PUBLIC_KEY?: string
+  /** Encrypts stored Tesla tokens (any long random string) */
+  TESLA_TOKEN_KEY?: string
 }
 
 export type UserRow = {

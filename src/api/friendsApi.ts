@@ -12,7 +12,7 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('Content-Type', 'application/json')
   const token = getToken()

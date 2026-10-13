@@ -15,5 +15,7 @@ export default createRouter({
     { path: '/results', component: Results },
     { path: '/nav', component: () => import('./views/Nav.vue') },
     { path: '/friends', component: Friends },
+    { path: '/live-data', component: () => import('./views/LiveData.vue') },
+    { path: '/stats', component: () => import('./views/Stats.vue') },
   ],
 })

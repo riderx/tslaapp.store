@@ -2,3 +2,9 @@
 CALLS_APP_ID=
 CALLS_APP_SECRET=
 GOOGLE_MAPS_API_KEY=
+TESLA_CLIENT_ID=
+TESLA_CLIENT_SECRET=
+TESLA_PUBLIC_KEY=
+TESLA_TOKEN_KEY=
+# Local dev: must match an allowed redirect URI in your Tesla app
+TESLA_REDIRECT_URI=http://localhost:8787/api/tesla/callback

@@ -31,15 +31,15 @@ const apps = [
     id: "stats",
     name: "Stats",
     icon: Activity,
-    available: false,
-    comingSoon: true,
+    available: true,
+    route: '/stats'
   },
   {
     id: "livedata",
     name: "Live Data",
     icon: Zap,
-    available: false,
-    comingSoon: true,
+    available: true,
+    route: '/live-data'
   },
   {
     id: "friends",

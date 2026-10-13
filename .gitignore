@@ -29,3 +29,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Tesla Fleet API keys
+tesla-private-key.pem
+tesla-public-key.pem
