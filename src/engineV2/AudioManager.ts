@@ -7,6 +7,8 @@ export type EngineSoundState = {
     load: number;
     cut: boolean;
     gearRatio: number;
+    ignition: boolean;
+    starter: boolean;
 }
 
 /**
@@ -78,6 +80,8 @@ export class AudioManager {
         p.get('load')!.value = clamp(state.load, 0, 1);
         p.get('cut')!.value = state.cut ? 1 : 0;
         p.get('gearRatio')!.value = Math.max(0, state.gearRatio);
+        p.get('ignition')!.value = state.ignition ? 1 : 0;
+        p.get('starter')!.value = state.starter ? 1 : 0;
     }
 
     /* Door speakers alone can't take the low end: shelve it and cut the sub-bass */

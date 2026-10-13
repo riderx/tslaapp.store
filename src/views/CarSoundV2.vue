@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch } from 'vue'
-import { Volume2, ChevronRight } from 'lucide-vue-next'
-import { Vehicle } from '../engineV2/Vehicle'
+import { Volume2, ChevronRight, Power } from 'lucide-vue-next'
+import { Vehicle, type EngineState } from '../engineV2/Vehicle'
 import * as configurations from '../engineV2/configurations'
 import type { EngineConfiguration } from '../engineV2/configurations'
 import { SHIFT_MODE_LIST, type ShiftMode } from '../engineV2/shiftModes'
@@ -29,6 +29,8 @@ const sensitivity = ref(55)
 const selectedConfig = ref<keyof typeof configurations>('bac_mono')
 const subwoofer = ref(localStorage.getItem('carSound.subwoofer') !== 'off')
 const driving = ref(false)
+const engineState = ref<EngineState>('off')
+const engineOn = computed(() => engineState.value === 'running' || engineState.value === 'starting')
 const shiftMode = ref<ShiftMode>('average')
 const autoShiftEnabled = ref(true)
 
@@ -45,6 +47,9 @@ let gpsFixAt = 0
 let roadSpeed = 0
 let blipUntil = 0
 let revHeld = false
+/* After key off, give the car's audio back once the exhaust has stopped ticking */
+const RELEASE_AUDIO_MS = 20000
+let releaseAudioTimer: ReturnType<typeof setTimeout> | null = null
 
 const rpmDisplay = computed(() => Math.round(rpm.value).toLocaleString())
 const speedDisplay = computed(() => Math.round(speed.value).toLocaleString())
@@ -52,9 +57,11 @@ const gearDisplay = computed(() => (gear.value === 0 ? 'N' : String(gear.value))
 const activeConfig = computed(() => configurations[selectedConfig.value] as EngineConfiguration)
 const statusLabel = computed(() => {
   if (errorMessage.value) return 'Error'
-  if (!engineReady.value) return 'Starting…'
+  if (!engineReady.value) return 'Loading…'
+  if (engineState.value === 'starting') return 'Starting engine…'
+  if (!engineOn.value) return 'Engine off'
   if (driving.value) return autoShiftEnabled.value ? 'Driving · Auto' : 'Driving · Manual'
-  return 'Ready · stopped'
+  return 'Engine on · stopped'
 })
 
 /* Tachometer: 270° sweep, one label per 1,000 rpm, red zone from the soft limiter */
@@ -143,15 +150,53 @@ const blip = () => {
   blipUntil = performance.now() + BLIP_MS
 }
 
-const shiftUpManual = () => {
+const clearReleaseAudioTimer = () => {
+  if (releaseAudioTimer) {
+    clearTimeout(releaseAudioTimer)
+    releaseAudioTimer = null
+  }
+}
+
+const setPlaybackState = (state: MediaSessionPlaybackState) => {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = state
+}
+
+const startEngine = () => {
   if (!vehicle.value || !engineReady.value) return
+  clearReleaseAudioTimer()
+  void resumeAudioIfNeeded()
+  vehicle.value.start()
+  setPlaybackState('playing')
+}
+
+const stopEngine = () => {
+  if (!vehicle.value) return
+  revHeld = false
+  blipUntil = 0
+  vehicle.value.stop()
+  setPlaybackState('paused')
+  clearReleaseAudioTimer()
+  releaseAudioTimer = setTimeout(() => {
+    releaseAudioTimer = null
+    const ctx = vehicle.value?.audio.ctx
+    if (ctx && !engineOn.value) void ctx.suspend()
+  }, RELEASE_AUDIO_MS)
+}
+
+const toggleEngine = () => {
+  if (engineOn.value) stopEngine()
+  else startEngine()
+}
+
+const shiftUpManual = () => {
+  if (!vehicle.value || engineState.value !== 'running') return
   if (!vehicle.value.driving) return blip()
   enterManualMode()
   vehicle.value.nextGear()
 }
 
 const shiftDownManual = () => {
-  if (!vehicle.value || !engineReady.value) return
+  if (!vehicle.value || engineState.value !== 'running') return
   if (!vehicle.value.driving) return blip()
   enterManualMode()
   vehicle.value.prevGear()
@@ -209,7 +254,13 @@ const currentAccel = () => {
 }
 
 /* Speed between fixes: extrapolate the last fix for half a second at most */
+const GPS_STALE_MS = 3000
 const currentSpeed = (now: number, dt: number) => {
+  /* No fix for a while: don't keep the car "moving" on an old reading */
+  if (gpsFixAt && now - gpsFixAt > GPS_STALE_MS) {
+    gpsSpeed = 0
+    gpsAccel = 0
+  }
   const since = gpsFixAt ? Math.min((now - gpsFixAt) / 1000, 0.5) : 0
   const predicted = Math.max(0, gpsSpeed + gpsAccel * since)
   roadSpeed += (predicted - roadSpeed) * (1 - Math.exp(-dt / 0.15))
@@ -228,7 +279,7 @@ const startWatchingPosition = () => {
   watchId = navigator.geolocation.watchPosition(
     (position) => {
       const now = performance.now()
-      let kmh = speed.value
+      let kmh = gpsSpeed * 3.6
       if (lastPosition && lastStamp) {
         const distance = calculateDistance(
           lastPosition.coords.latitude,
@@ -236,8 +287,9 @@ const startWatchingPosition = () => {
           position.coords.latitude,
           position.coords.longitude,
         )
+        /* Fixes milliseconds apart turn a few meters of jitter into a huge speed */
         const timeDiff = (now - lastStamp) / 3600000
-        if (timeDiff > 0) kmh = distance / timeDiff
+        if (now - lastStamp >= 500) kmh = distance / timeDiff
       }
       // Prefer native speed when available (m/s -> km/h)
       if (typeof position.coords.speed === 'number' && !Number.isNaN(position.coords.speed) && position.coords.speed >= 0) {
@@ -255,7 +307,6 @@ const startWatchingPosition = () => {
       }
       gpsSpeed = next
       gpsFixAt = now
-      speed.value = kmh
 
       lastPosition = position
       lastStamp = now
@@ -340,9 +391,13 @@ const bindMediaKeys = () => {
         artist: 'tslap.store',
         album: 'Engine',
       })
-      navigator.mediaSession.playbackState = 'playing'
+      navigator.mediaSession.playbackState = engineOn.value ? 'playing' : 'paused'
       navigator.mediaSession.setActionHandler('nexttrack', () => shiftUpManual())
       navigator.mediaSession.setActionHandler('previoustrack', () => shiftDownManual())
+      /* Steering wheel press = key: start / stop the engine */
+      navigator.mediaSession.setActionHandler('play', () => startEngine())
+      navigator.mediaSession.setActionHandler('pause', () => stopEngine())
+      navigator.mediaSession.setActionHandler('stop', () => stopEngine())
     } catch (error) {
       console.warn('Media session unavailable', error)
     }
@@ -356,6 +411,9 @@ const unbindMediaKeys = () => {
       navigator.mediaSession.playbackState = 'paused'
       navigator.mediaSession.setActionHandler('nexttrack', null)
       navigator.mediaSession.setActionHandler('previoustrack', null)
+      navigator.mediaSession.setActionHandler('play', null)
+      navigator.mediaSession.setActionHandler('pause', null)
+      navigator.mediaSession.setActionHandler('stop', null)
     } catch {
       /* ignore */
     }
@@ -370,12 +428,15 @@ const handleMediaKeyDown = (e: KeyboardEvent) => {
   } else if (e.code === 'MediaTrackPrevious' || e.key === 'MediaTrackPrevious') {
     e.preventDefault()
     shiftDownManual()
+  } else if (e.code === 'MediaPlayPause' || e.key === 'MediaPlayPause') {
+    e.preventDefault()
+    toggleEngine()
   }
 }
 
 /* Parked: throttle only from blips and the rev button */
 const updateParkedThrottle = (now: number) => {
-  if (!vehicle.value || vehicle.value.driving) return
+  if (!vehicle.value || vehicle.value.driving || vehicle.value.state !== 'running') return
   const target = revHeld || now < blipUntil ? 1 : 0
   const current = vehicle.value.engine.throttle
   vehicle.value.engine.throttle = current + (target - current) * (target > current ? 0.5 : 0.25)
@@ -399,11 +460,14 @@ const startUpdateLoop = () => {
     if (dt > 0) {
       const step = Math.min(dt, 0.033)
       updateParkedThrottle(time)
-      vehicle.value.update(time, step, currentSpeed(time, step), currentAccel())
+      const road = currentSpeed(time, step)
+      vehicle.value.update(time, step, road, currentAccel())
+      speed.value = road * 3.6
       rpm.value = vehicle.value.engine.rpm
       throttle.value = vehicle.value.load
       gear.value = vehicle.value.drivetrain.gear
       driving.value = vehicle.value.driving
+      engineState.value = vehicle.value.state
     }
 
     animationId = requestAnimationFrame(update)
@@ -446,6 +510,8 @@ const teardownEngine = () => {
   gpsFixAt = 0
   roadSpeed = 0
   clearManualReturnTimer()
+  clearReleaseAudioTimer()
+  engineState.value = 'off'
   unbindMediaKeys()
   stopAccelerometer()
   stopGeolocation()
@@ -463,7 +529,7 @@ const resumeAudioIfNeeded = async () => {
   }
 }
 
-const bootEngine = async () => {
+const bootEngine = async (startAfterBoot = false) => {
   try {
     errorMessage.value = ''
     await initVehicle()
@@ -480,6 +546,7 @@ const bootEngine = async () => {
     bindMediaKeys()
     engineReady.value = true
     startUpdateLoop()
+    if (startAfterBoot) startEngine()
 
     // Browsers may keep AudioContext suspended until a gesture — unlock on first tap
     const unlock = () => {
@@ -496,8 +563,9 @@ const bootEngine = async () => {
 
 const handleConfigChange = async (e: Event) => {
   selectedConfig.value = (e.target as HTMLSelectElement).value as keyof typeof configurations
+  const wasOn = engineOn.value
   teardownEngine()
-  await bootEngine()
+  await bootEngine(wasOn)
 }
 
 onMounted(() => {
@@ -520,7 +588,7 @@ watch(shiftMode, () => syncAutoShift())
         </svg>
       </button>
       <span class="wordmark">CAR SOUND</span>
-      <span class="status" :class="{ live: engineReady && !errorMessage, error: !!errorMessage }">
+      <span class="status" :class="{ live: engineOn && !errorMessage, error: !!errorMessage }">
         <span class="status-dot"></span>{{ statusLabel }}
       </span>
     </header>
@@ -614,25 +682,34 @@ watch(shiftMode, () => syncAutoShift())
         <p v-if="errorMessage" class="hint error-text">{{ errorMessage }}</p>
         <p v-else class="hint">
           <template v-if="driving">RPM follows your speed through the gearbox, load follows acceleration. Steering wheel next/prev shifts.</template>
-          <template v-else>Stopped: steering wheel next/prev blips the throttle. Drive off and the engine follows the car.</template>
+          <template v-else-if="engineOn">Stopped: steering wheel next/prev blips the throttle. Drive off and the engine follows the car.</template>
+          <template v-else>Press Start, or press the steering wheel scroll button. Press again to switch the engine off.</template>
         </p>
 
         <div class="actions">
-          <template v-if="driving">
-            <button class="action secondary" @click="shiftDownManual">Gear −</button>
-            <button class="action secondary" @click="shiftUpManual">Gear +</button>
-          </template>
-          <button
-            v-else
-            class="action"
-            :disabled="!engineReady"
-            @pointerdown.prevent="startRev"
-            @pointerup="stopRev"
-            @pointerleave="stopRev"
-            @pointercancel="stopRev"
-          >
-            {{ engineReady ? 'Hold to rev' : 'Starting…' }}
+          <button v-if="!engineOn" class="action" :disabled="!engineReady" @click="startEngine">
+            <Power class="action-icon" /> {{ engineReady ? 'Start engine' : 'Loading…' }}
           </button>
+          <template v-else>
+            <button class="action secondary power" aria-label="Stop engine" @click="stopEngine">
+              <Power class="action-icon" />
+            </button>
+            <template v-if="driving">
+              <button class="action secondary" @click="shiftDownManual">Gear −</button>
+              <button class="action secondary" @click="shiftUpManual">Gear +</button>
+            </template>
+            <button
+              v-else
+              class="action"
+              :disabled="engineState !== 'running'"
+              @pointerdown.prevent="startRev"
+              @pointerup="stopRev"
+              @pointerleave="stopRev"
+              @pointercancel="stopRev"
+            >
+              {{ engineState === 'running' ? 'Hold to rev' : 'Starting…' }}
+            </button>
+          </template>
         </div>
       </aside>
     </main>
@@ -982,6 +1059,10 @@ watch(shiftMode, () => syncAutoShift())
 
 .action {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
   padding: 1.15rem;
   border-radius: 12px;
   background: var(--action-bg);
@@ -991,6 +1072,16 @@ watch(shiftMode, () => syncAutoShift())
   touch-action: none;
   user-select: none;
   transition: transform 0.1s ease, opacity 0.15s ease;
+}
+
+.action-icon {
+  width: 1.2rem;
+  height: 1.2rem;
+}
+
+.action.secondary.power {
+  flex: 0 0 4.25rem;
+  color: var(--red);
 }
 
 .action:active {

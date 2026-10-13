@@ -10,6 +10,13 @@ const PARK_BELOW = 1.0;   // m/s
 const DRIVE_ABOVE = 1.6;  // m/s
 const PARK_AFTER_MS = 1200;
 
+/* Key on: starter cranks on compression only, then the engine catches and flares */
+const CRANK_MS = 750;
+const CRANK_RPM = 230;
+const FLARE_MS = 400;
+
+export type EngineState = 'off' | 'starting' | 'running' | 'stopping';
+
 export class Vehicle {
 
     audio = new AudioManager();
@@ -33,6 +40,10 @@ export class Vehicle {
 
     wheel_radius = 0.335;
 
+    state: EngineState = 'off';
+    private stateSince = 0;
+    private flareUntil = 0;
+
     async init(configuration: EngineConfiguration) {
         this.audio.dispose();
         this.drivetrain.dispose();
@@ -42,6 +53,9 @@ export class Vehicle {
         this.wheel_radius = configuration.wheelRadius;
         this.driving = false;
         this.load = 0;
+        this.state = 'off';
+        this.engine.rpm = 0;
+        this.engine.omega = 0;
 
         this.audio = new AudioManager();
         await this.audio.init({
@@ -65,6 +79,10 @@ export class Vehicle {
      */
     update(time: number, dt: number, speed: number, accel: number) {
         this.speed = speed;
+        if (this.state !== 'running') {
+            this.ignitionFrame(time, dt);
+            return;
+        }
         if (this.driving) {
             if (speed < PARK_BELOW) {
                 if (!this.slowSince) this.slowSince = time;
@@ -86,8 +104,74 @@ export class Vehicle {
             this.rev(time, dt);
     }
 
+    start(time = performance.now()) {
+        if (this.state !== 'off' && this.state !== 'stopping') return;
+        this.state = 'starting';
+        this.stateSince = time;
+    }
+
+    stop(time = performance.now()) {
+        if (this.state !== 'running' && this.state !== 'starting') return;
+        this.state = 'stopping';
+        this.stateSince = time;
+        this.driving = false;
+        this.slowSince = 0;
+        this.drivetrain.gear = 0;
+        this.engine.throttle = 0;
+        this.load = 0;
+    }
+
+    /* Cranking, spinning down after key off, or off */
+    private ignitionFrame(time: number, dt: number) {
+        const engine = this.engine;
+        let starter = false;
+
+        if (this.state === 'starting') {
+            const t = time - this.stateSince;
+            starter = true;
+            /* The starter spins the crank up; each compression slows it a bit */
+            const spinUp = clamp(t / 150, 0, 1);
+            engine.rpm = CRANK_RPM * spinUp * (1 + 0.08 * Math.sin(t * 0.06));
+
+            if (t >= CRANK_MS) {
+                this.state = 'running';
+                this.flareUntil = time + FLARE_MS;
+                /* Hand the crank to the physics model, the idle governor pulls it up */
+                engine.omega = (engine.rpm * 2 * Math.PI) / 60;
+                engine.theta = 0;
+                engine.prevTheta = 0;
+                starter = false;
+            }
+        } else if (this.state === 'stopping') {
+            engine.rpm += (0 - engine.rpm) * (1 - Math.exp(-dt / 0.3));
+            if (engine.rpm < 40) {
+                engine.rpm = 0;
+                this.state = 'off';
+            }
+        } else {
+            engine.rpm = 0;
+        }
+
+        engine.omega = (engine.rpm * 2 * Math.PI) / 60;
+        engine.throttle = 0;
+        this.load = 0;
+
+        this.audio.update({
+            rpm: engine.rpm,
+            load: 0,
+            cut: false,
+            gearRatio: 0,
+            ignition: this.state === 'running',
+            starter,
+        });
+    }
+
     /* Stopped: free revving in neutral */
     private rev(time: number, dt: number) {
+        /* Catching after the starter: a short flare above idle */
+        if (time < this.flareUntil)
+            this.engine.throttle = Math.max(this.engine.throttle, 0.55);
+
         const subSteps = 20;
         const h = dt / subSteps;
 
@@ -104,6 +188,8 @@ export class Vehicle {
             load: this.engine.throttle,
             cut: this.engine.rpm >= this.engine.soft_limiter,
             gearRatio: 0,
+            ignition: true,
+            starter: false,
         });
     }
 
@@ -154,6 +240,8 @@ export class Vehicle {
             load: engine.throttle,
             cut: engine.rpm >= engine.soft_limiter || (shifting && this.upshifting),
             gearRatio: this.drivetrain.getGearRatio(),
+            ignition: true,
+            starter: false,
         });
     }
 
