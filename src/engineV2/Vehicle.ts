@@ -9,11 +9,17 @@ import { clamp } from "./util/clamp";
 const PARK_BELOW = 1.0;   // m/s
 const DRIVE_ABOVE = 1.6;  // m/s
 const PARK_AFTER_MS = 1200;
+/* GPS jitter can spike over DRIVE_ABOVE for one fix: the speed has to hold */
+const DRIVE_AFTER_MS = 400;
 
 /* Key on: starter cranks on compression only, then the engine catches and flares */
 const CRANK_MS = 750;
 const CRANK_RPM = 230;
 const FLARE_MS = 400;
+/* Synthetic voices (EV / jet) power up instead of cranking */
+const POWER_UP_MS = 250;
+/* Still spinning this fast after key off: the engine catches again without the starter */
+const RECATCH_RPM = 300;
 
 export type EngineState = 'off' | 'starting' | 'running' | 'stopping';
 
@@ -36,6 +42,7 @@ export class Vehicle {
     private shiftUntil = 0;
     private upshifting = false;
     private slowSince = 0;
+    private fastSince = 0;
     private speed = 0;
 
     wheel_radius = 0.335;
@@ -43,6 +50,8 @@ export class Vehicle {
     state: EngineState = 'off';
     private stateSince = 0;
     private flareUntil = 0;
+    /* EV / jet voice: no starter, no crank */
+    private synthetic = false;
 
     async init(configuration: EngineConfiguration) {
         this.audio.dispose();
@@ -51,6 +60,7 @@ export class Vehicle {
         this.engine.init(configuration.engine);
         this.drivetrain.init(configuration.drivetrain);
         this.wheel_radius = configuration.wheelRadius;
+        this.synthetic = !!configuration.synth.voice;
         this.driving = false;
         this.load = 0;
         this.state = 'off';
@@ -91,11 +101,17 @@ export class Vehicle {
                 this.slowSince = 0;
             }
         } else if (speed > DRIVE_ABOVE) {
-            this.driving = true;
-            this.slowSince = 0;
-            this.drivetrain.dispose();
-            this.drivetrain.init();
-            this.drivetrain.gear = this.pickGear(speed);
+            if (!this.fastSince) this.fastSince = time;
+            if (time - this.fastSince > DRIVE_AFTER_MS) {
+                this.driving = true;
+                this.slowSince = 0;
+                this.fastSince = 0;
+                this.drivetrain.dispose();
+                this.drivetrain.init();
+                this.drivetrain.gear = this.pickGear(speed);
+            }
+        } else {
+            this.fastSince = 0;
         }
 
         if (this.driving)
@@ -104,10 +120,26 @@ export class Vehicle {
             this.rev(time, dt);
     }
 
-    start(time = performance.now()) {
+    /* `running`: skip the starter (switching sound with the engine already on) */
+    start(time = performance.now(), running = false) {
         if (this.state !== 'off' && this.state !== 'stopping') return;
+        if (running || (this.state === 'stopping' && this.engine.rpm > RECATCH_RPM)) {
+            this.catch(time, running ? this.engine.idle : this.engine.rpm, false);
+            return;
+        }
         this.state = 'starting';
         this.stateSince = time;
+    }
+
+    /* The engine fires: hand the crank to the physics model, the idle governor pulls it up */
+    private catch(time: number, rpm: number, flare: boolean) {
+        const engine = this.engine;
+        this.state = 'running';
+        this.flareUntil = flare && !this.synthetic ? time + FLARE_MS : 0;
+        engine.rpm = rpm;
+        engine.omega = (rpm * 2 * Math.PI) / 60;
+        engine.theta = 0;
+        engine.prevTheta = 0;
     }
 
     stop(time = performance.now()) {
@@ -116,6 +148,7 @@ export class Vehicle {
         this.stateSince = time;
         this.driving = false;
         this.slowSince = 0;
+        this.fastSince = 0;
         this.drivetrain.gear = 0;
         this.engine.throttle = 0;
         this.load = 0;
@@ -129,18 +162,21 @@ export class Vehicle {
         if (this.state === 'starting') {
             const t = time - this.stateSince;
             starter = true;
-            /* The starter spins the crank up; each compression slows it a bit */
-            const spinUp = clamp(t / 150, 0, 1);
-            engine.rpm = CRANK_RPM * spinUp * (1 + 0.08 * Math.sin(t * 0.06));
-
-            if (t >= CRANK_MS) {
-                this.state = 'running';
-                this.flareUntil = time + FLARE_MS;
-                /* Hand the crank to the physics model, the idle governor pulls it up */
-                engine.omega = (engine.rpm * 2 * Math.PI) / 60;
-                engine.theta = 0;
-                engine.prevTheta = 0;
-                starter = false;
+            if (this.synthetic) {
+                /* Power-up swell up to idle, no crank wobble */
+                engine.rpm = engine.idle * clamp(t / POWER_UP_MS, 0, 1);
+                if (t >= POWER_UP_MS) {
+                    this.catch(time, engine.idle, false);
+                    starter = false;
+                }
+            } else {
+                /* The starter spins the crank up; each compression slows it a bit */
+                const spinUp = clamp(t / 150, 0, 1);
+                engine.rpm = CRANK_RPM * spinUp * (1 + 0.08 * Math.sin(t * 0.06));
+                if (t >= CRANK_MS) {
+                    this.catch(time, engine.rpm, true);
+                    starter = false;
+                }
             }
         } else if (this.state === 'stopping') {
             engine.rpm += (0 - engine.rpm) * (1 - Math.exp(-dt / 0.3));
@@ -152,7 +188,7 @@ export class Vehicle {
             engine.rpm = 0;
         }
 
-        engine.omega = (engine.rpm * 2 * Math.PI) / 60;
+        if (this.state !== 'running') engine.omega = (engine.rpm * 2 * Math.PI) / 60;
         engine.throttle = 0;
         this.load = 0;
 
@@ -209,13 +245,18 @@ export class Vehicle {
 
         /* Load: rolling resistance at cruise, plus whatever accelerates the car */
         const cruise = 0.1 + 0.25 * clamp(speed / 40, 0, 1);
-        const loadTarget = accel < -0.35 ? 0 : clamp(cruise + accel / 3.2, 0, 1);
+        /* Lifting off in a Tesla means regen, well past -0.8 m/s²; milder is GPS noise or a slope */
+        const loadTarget = accel < -0.8 ? 0 : clamp(cruise + accel / 3.2, 0, 1);
         const k = 1 - Math.exp(-dt / (loadTarget > this.load ? 0.12 : 0.25));
         this.load += (loadTarget - this.load) * k;
 
         const shifting = time < this.shiftUntil;
         if (this.autoShiftEnabled && !shifting)
             this.tickAutoShift(time, speed);
+
+        /* Back from a GPS gap far too fast for this gear: jump straight to the right one */
+        if (this.rpmAt(this.drivetrain.gear, speed) > engine.limiter * 1.05)
+            this.drivetrain.gear = this.pickGear(speed);
 
         const gear = this.drivetrain.gear;
         let rpm = this.rpmAt(gear, speed);
@@ -264,8 +305,8 @@ export class Vehicle {
     private upshiftRpm() {
         const mode = SHIFT_MODES[this.shiftMode];
         const limiter = this.engine.limiter;
-        const light = limiter * mode.upshift * 0.55;
-        return light + (limiter * 0.94 - light) * Math.pow(this.load, 2);
+        const light = limiter * (0.25 + 0.3 * mode.upshift);
+        return light + (limiter * 0.94 - light) * Math.pow(this.load, 1.5);
     }
 
     private downshiftRpm() {
@@ -309,16 +350,23 @@ export class Vehicle {
         this.shiftMode = mode;
     }
 
-    /* Manual shift while driving; a downshift that would over-rev is refused */
+    /*
+     * Manual shift while driving, one gear per shift: a scroll-wheel flick sends a
+     * burst of events. Returns false when refused (mid-shift, no gear, would over-rev).
+     */
     nextGear(time = performance.now()) {
-        if (!this.driving) return;
-        this.shiftTo(this.drivetrain.gear + 1, time);
+        if (!this.driving || time < this.shiftUntil) return false;
+        const gear = this.drivetrain.gear + 1;
+        if (gear > this.drivetrain.gears.length) return false;
+        this.shiftTo(gear, time);
+        return true;
     }
 
     prevGear(time = performance.now()) {
-        if (!this.driving) return;
+        if (!this.driving || time < this.shiftUntil) return false;
         const gear = this.drivetrain.gear - 1;
-        if (gear < 1 || this.rpmAt(gear, this.speed) > this.engine.limiter) return;
+        if (gear < 1 || this.rpmAt(gear, this.speed) > this.engine.limiter) return false;
         this.shiftTo(gear, time);
+        return true;
     }
 }

@@ -346,9 +346,9 @@ export const ioniq_5n_supersonic: EngineConfiguration = {
             turbineBase: 700,
             turbineHzPerRpm: 0.75,
             whine: 0.2,
-            roar: 1.6,
-            rumble: 1.0,
+            roar: 1.15,
+            rumble: 0.6,
         },
-        gain: 1.35,
+        gain: 1.55,
     },
 }

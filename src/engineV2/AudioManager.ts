@@ -67,17 +67,13 @@ export class AudioManager {
                 return;
             throw error;
         }
-
-        /* Without a user gesture resume() stays pending: don't block on it, the page unlocks on first tap */
-        if (this.ctx.state === 'suspended')
-            void this.ctx.resume().catch(() => { /* resumed on next gesture */ });
     }
 
     update(state: EngineSoundState) {
         if (!this.node || !this.ctx) return;
         const p = this.node.parameters;
-        p.get('rpm')!.value = Math.max(0, state.rpm);
-        p.get('load')!.value = clamp(state.load, 0, 1);
+        p.get('rpm')!.value = Number.isFinite(state.rpm) ? Math.max(0, state.rpm) : 0;
+        p.get('load')!.value = Number.isFinite(state.load) ? clamp(state.load, 0, 1) : 0;
         p.get('cut')!.value = state.cut ? 1 : 0;
         p.get('gearRatio')!.value = Math.max(0, state.gearRatio);
         p.get('ignition')!.value = state.ignition ? 1 : 0;
@@ -91,9 +87,18 @@ export class AudioManager {
         this.bassCut.frequency.value = present ? 20 : 70;
     }
 
-    setMasterVolume(value: number) {
-        if (this.volume) {
-            this.volume.gain.value = clamp(value, 0, 1);
+    /* `fadeSeconds` ramps instead of jumping (switching sound with the engine on) */
+    setMasterVolume(value: number, fadeSeconds = 0) {
+        if (!this.volume || !this.ctx) return;
+        const gain = this.volume.gain;
+        const target = clamp(value, 0, 1);
+        const now = this.ctx.currentTime;
+        gain.cancelScheduledValues(now);
+        if (fadeSeconds > 0) {
+            gain.setValueAtTime(gain.value, now);
+            gain.linearRampToValueAtTime(target, now + fadeSeconds);
+        } else {
+            gain.setValueAtTime(target, now);
         }
     }
 

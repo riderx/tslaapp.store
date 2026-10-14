@@ -96,6 +96,14 @@ type Pulse = {
 
 const onePole = (seconds: number) => 1 - Math.exp(-1 / (sampleRate * seconds));
 
+/* Jet turbine partials */
+const JET_RATIOS = [1, 2.01, 3.97];
+const JET_GAINS = [0.6, 0.25, 0.1];
+/* Afterfire pops in flight at once; preallocated, nothing is allocated on the audio thread */
+const MAX_POPS = 8;
+/* Engine off and quiet for this long: stop computing and output silence */
+const QUIET_SECONDS = 0.5;
+
 class EngineSynthProcessor extends AudioWorkletProcessor {
     static get parameterDescriptors() {
         return [
@@ -148,7 +156,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
 
     /* Overrun */
     overrun = 0;
-    pops: Pulse[] = [];
+    pops: Pulse[] = Array.from({ length: MAX_POPS }, () => ({ t: 0, amp: 0, tau: 1, noise: 0 }));
     popLp = new Biquad();
 
     /* Turbo */
@@ -189,6 +197,7 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
     kSpool = onePole(0.7);
     kMuffler = onePole(0.08);
     blockCounter = 0;
+    quietBlocks = 0;
 
     constructor(options: { processorOptions: EngineSynthOptions }) {
         super(options);
@@ -269,13 +278,13 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
 
     /* Afterfire in the exhaust line, a few ms to a few tens of ms later */
     pop(amp: number) {
-        if (this.pops.length > 6) return;
-        this.pops.push({
-            t: -Math.random() * 0.03 * sampleRate,
-            amp,
-            tau: (0.0008 + Math.random() * 0.0012) * sampleRate,
-            noise: amp * 1.4,
-        });
+        let p: Pulse | undefined;
+        for (let k = 0; k < MAX_POPS && !p; k++) if (this.pops[k].amp === 0) p = this.pops[k];
+        if (!p) return;
+        p.t = -Math.random() * 0.03 * sampleRate;
+        p.amp = amp;
+        p.tau = (0.0008 + Math.random() * 0.0012) * sampleRate;
+        p.noise = amp * 1.4;
     }
 
     updateFilters() {
@@ -323,13 +332,11 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const n = Math.min(1, this.jetRpm / this.limiter);
         const f = voice.turbineBase + this.jetRpm * voice.turbineHzPerRpm;
 
-        const ratios = [1, 2.01, 3.97];
-        const gains = [0.6, 0.25, 0.1];
         let tone = 0;
         for (let i = 0; i < 3; i++) {
-            this.voicePhases[i] += f * ratios[i] / sampleRate;
+            this.voicePhases[i] += f * JET_RATIOS[i] / sampleRate;
             if (this.voicePhases[i] > 1) this.voicePhases[i] -= 1;
-            tone += Math.sin(TAU * this.voicePhases[i]) * gains[i];
+            tone += Math.sin(TAU * this.voicePhases[i]) * JET_GAINS[i];
         }
         tone *= voice.whine * (0.3 + 0.7 * n);
 
@@ -345,11 +352,24 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
         const left = out[0];
         const spec = this.spec;
 
-        const rpmTarget = params.rpm[0];
-        const loadTarget = params.load[0];
-        this.cut = params.cut[0];
-        const ignition = params.ignition[0];
-        this.starter = params.starter[0];
+        /* One bad value would latch NaN into every filter for the life of the context */
+        const finite = (v: number) => (Number.isFinite(v) ? v : 0);
+        const rpmTarget = finite(params.rpm[0]);
+        const loadTarget = finite(params.load[0]);
+        this.cut = finite(params.cut[0]);
+        const ignition = finite(params.ignition[0]);
+        this.starter = finite(params.starter[0]);
+        if (!Number.isFinite(this.rpm)) this.rpm = 0;
+        if (!Number.isFinite(this.load)) this.load = 0;
+
+        /* Engine off and silent: skip the DSP */
+        const quiet = ignition < 0.5 && this.starter < 0.5 && rpmTarget < 1 && this.rpm < 1
+            && this.cooling < 0.01 && this.gate < 0.001;
+        this.quietBlocks = quiet ? this.quietBlocks + 1 : 0;
+        if (this.quietBlocks * left.length > sampleRate * QUIET_SECONDS) {
+            for (let c = 0; c < out.length; c++) out[c].fill(0);
+            return true;
+        }
         /* Key off after the engine ran: the line ticks while it cools */
         if (!spec.voice && this.ignition > 0.5 && ignition < 0.5 && this.rpm > this.idle * 0.5) this.cooling = 1;
         if (ignition > 0.5) this.cooling = 0;
@@ -441,13 +461,14 @@ class EngineSynthProcessor extends AudioWorkletProcessor {
 
             /* Afterfire pops happen in the line, past the muffler's dampening */
             let pops = 0;
-            for (let k = this.pops.length - 1; k >= 0; k--) {
+            for (let k = 0; k < MAX_POPS; k++) {
                 const p = this.pops[k];
+                if (p.amp === 0) continue;
                 p.t++;
                 if (p.t < 0) continue;
                 const x = p.t / p.tau;
                 pops += p.amp * x * Math.exp(1 - x) + p.noise * Math.exp(-x * 0.35) * (Math.random() * 2 - 1);
-                if (x > 14) this.pops.splice(k, 1);
+                if (x > 14) p.amp = 0;
             }
             exhaust += this.popLp.process(pops);
 

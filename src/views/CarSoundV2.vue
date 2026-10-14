@@ -17,9 +17,8 @@ const throttle = ref(0)
 const gear = ref(0)
 const volume = ref(50)
 const speed = ref(0)
-const acceleration = ref(0)
 
-type PermissionStatus = 'off' | 'pending' | 'allowed' | 'denied'
+type PermissionStatus = 'off' | 'pending' | 'searching' | 'allowed' | 'lost' | 'denied' | 'none'
 const accelerometerStatus = ref<PermissionStatus>('off')
 const geolocationStatus = ref<PermissionStatus>('off')
 
@@ -34,6 +33,16 @@ const engineOn = computed(() => engineState.value === 'running' || engineState.v
 const shiftMode = ref<ShiftMode>('average')
 const autoShiftEnabled = ref(true)
 
+/* Bumped by every boot, engine switch and teardown: a stale async step sees it and backs out */
+let bootId = 0
+/* Bumped on teardown only: GPS / motion callbacks from a torn-down page back out */
+let sensorSession = 0
+/* Browser kept audio suspended (no user gesture yet): a tap on the page unlocks it */
+const audioBlocked = ref(false)
+/* A refused manual shift flashes the gear */
+const shiftRefused = ref(false)
+let shiftRefusedTimer: ReturnType<typeof setTimeout> | null = null
+
 let animationId: number | null = null
 let lastTime = 0
 let watchId: number | null = null
@@ -42,13 +51,15 @@ let manualReturnTimer: ReturnType<typeof setTimeout> | null = null
 /* Road speed (m/s) and acceleration (m/s²) estimated from GPS fixes, predicted between them */
 const BLIP_MS = 350
 let gpsSpeed = 0
+/* Raw acceleration from the last two fixes, and the same smoothed over frames */
+let gpsAccelRaw = 0
 let gpsAccel = 0
 let gpsFixAt = 0
 let roadSpeed = 0
 let blipUntil = 0
 let revHeld = false
 /* After key off, give the car's audio back once the exhaust has stopped ticking */
-const RELEASE_AUDIO_MS = 20000
+const RELEASE_AUDIO_MS = 8000
 let releaseAudioTimer: ReturnType<typeof setTimeout> | null = null
 
 const rpmDisplay = computed(() => Math.round(rpm.value).toLocaleString())
@@ -59,6 +70,8 @@ const statusLabel = computed(() => {
   if (errorMessage.value) return 'Error'
   if (!engineReady.value) return 'Loading…'
   if (engineState.value === 'starting') return 'Starting engine…'
+  if (engineState.value === 'stopping') return 'Switching off…'
+  if (audioBlocked.value) return 'Tap to enable sound'
   if (!engineOn.value) return 'Engine off'
   if (driving.value) return autoShiftEnabled.value ? 'Driving · Auto' : 'Driving · Manual'
   return 'Engine on · stopped'
@@ -99,6 +112,12 @@ const permissionLabel = (status: PermissionStatus) => {
       return 'Allowed'
     case 'pending':
       return 'Requesting…'
+    case 'searching':
+      return 'Searching…'
+    case 'lost':
+      return 'Signal lost'
+    case 'none':
+      return 'No sensor'
     case 'denied':
       return 'Blocked / denied'
     default:
@@ -164,7 +183,7 @@ const setPlaybackState = (state: MediaSessionPlaybackState) => {
 const startEngine = () => {
   if (!vehicle.value || !engineReady.value) return
   clearReleaseAudioTimer()
-  void resumeAudioIfNeeded()
+  void unlockAudio()
   vehicle.value.start()
   setPlaybackState('playing')
 }
@@ -178,9 +197,41 @@ const stopEngine = () => {
   clearReleaseAudioTimer()
   releaseAudioTimer = setTimeout(() => {
     releaseAudioTimer = null
-    const ctx = vehicle.value?.audio.ctx
-    if (ctx && !engineOn.value) void ctx.suspend()
+    if (!engineOn.value) releaseAudio()
   }, RELEASE_AUDIO_MS)
+}
+
+/* Engine off: hand the car's audio back */
+const releaseAudio = () => {
+  audioBlocked.value = false
+  const ctx = vehicle.value?.audio.ctx
+  if (ctx && ctx.state === 'running') void ctx.suspend()
+}
+
+/* Without a user gesture resume() can stay pending forever: give it a moment, then say so */
+const unlockAudio = async () => {
+  const ctx = vehicle.value?.audio.ctx
+  if (!ctx) return
+  if (ctx.state !== 'running') {
+    await Promise.race([
+      ctx.resume().catch(() => { /* retried on the next tap */ }),
+      new Promise((resolve) => setTimeout(resolve, 400)),
+    ])
+  }
+  audioBlocked.value = ctx.state !== 'running' && engineOn.value
+}
+
+const handlePagePointer = () => {
+  if (engineOn.value) void unlockAudio()
+}
+
+const flashShiftRefused = () => {
+  shiftRefused.value = true
+  if (shiftRefusedTimer) clearTimeout(shiftRefusedTimer)
+  shiftRefusedTimer = setTimeout(() => {
+    shiftRefused.value = false
+    shiftRefusedTimer = null
+  }, 400)
 }
 
 const toggleEngine = () => {
@@ -192,19 +243,19 @@ const shiftUpManual = () => {
   if (!vehicle.value || engineState.value !== 'running') return
   if (!vehicle.value.driving) return blip()
   enterManualMode()
-  vehicle.value.nextGear()
+  if (!vehicle.value.nextGear()) flashShiftRefused()
 }
 
 const shiftDownManual = () => {
   if (!vehicle.value || engineState.value !== 'running') return
   if (!vehicle.value.driving) return blip()
   enterManualMode()
-  vehicle.value.prevGear()
+  if (!vehicle.value.prevGear()) flashShiftRefused()
 }
 
 const startRev = () => {
   revHeld = true
-  void resumeAudioIfNeeded()
+  void unlockAudio()
 }
 
 const stopRev = () => {
@@ -232,6 +283,16 @@ const handleVolumeChange = (e: Event) => {
 
 const stopAccelerometer = () => {
   window.removeEventListener('devicemotion', handleMotion)
+  if (motionWaitTimer) {
+    clearTimeout(motionWaitTimer)
+    motionWaitTimer = null
+  }
+  motion.fill(0)
+  for (const fit of axisFit) {
+    fit.sg = 0
+    fit.ss = 0
+  }
+  gpsVar = 0
 }
 
 const stopGeolocation = () => {
@@ -241,79 +302,148 @@ const stopGeolocation = () => {
   }
 }
 
+/*
+ * Which device axis is the car's forward axis depends on how the screen is
+ * mounted. Learn it: keep a running correlation of each axis against GPS
+ * acceleration and only use the accelerometer once one axis clearly tracks it.
+ */
+const motion = [0, 0, 0]
+const axisFit = [0, 1, 2].map(() => ({ sg: 0, ss: 0 }))
+let gpsVar = 0
+const AXIS_TRUST = 0.6
+
 const handleMotion = (event: DeviceMotionEvent) => {
-  if (!event.acceleration) return
-  acceleration.value = event.acceleration.y || 0
+  const a = event.acceleration
+  if (!a || a.x === null || a.y === null || a.z === null) return
+  if (accelerometerStatus.value === 'pending' || accelerometerStatus.value === 'none') accelerometerStatus.value = 'allowed'
+  /* Low-pass: road buzz is not throttle */
+  const values = [a.x, a.y, a.z]
+  for (let i = 0; i < 3; i++) motion[i] += ((values[i] || 0) - motion[i]) * 0.08
 }
 
-/* Longitudinal acceleration: GPS, sharpened by the accelerometer when it reports something */
+const learnMotionAxis = (dt: number) => {
+  /* Only informative while the car is clearly speeding up or slowing down */
+  if (accelerometerStatus.value !== 'allowed' || Math.abs(gpsAccel) < 0.3) return
+  const keep = Math.exp(-dt / 30)
+  gpsVar = gpsVar * keep + gpsAccel * gpsAccel
+  for (let i = 0; i < 3; i++) {
+    axisFit[i].sg = axisFit[i].sg * keep + motion[i] * gpsAccel
+    axisFit[i].ss = axisFit[i].ss * keep + motion[i] * motion[i]
+  }
+}
+
+/* Forward acceleration from the accelerometer, or null while no axis is trusted yet */
+const sensorAccel = () => {
+  if (accelerometerStatus.value !== 'allowed' || gpsVar <= 0) return null
+  let best = -1
+  let bestCorr = 0
+  for (let i = 0; i < 3; i++) {
+    const { sg, ss } = axisFit[i]
+    const corr = ss > 0 ? sg / Math.sqrt(ss * gpsVar) : 0
+    if (Math.abs(corr) > Math.abs(bestCorr)) {
+      bestCorr = corr
+      best = i
+    }
+  }
+  if (best < 0 || Math.abs(bestCorr) < AXIS_TRUST) return null
+  return Math.sign(bestCorr) * motion[best]
+}
+
+/* Longitudinal acceleration: GPS, sharpened by the accelerometer once it is calibrated */
 const currentAccel = () => {
-  const sensor = accelerometerStatus.value === 'allowed' ? acceleration.value : 0
-  const accel = Math.abs(sensor) > 0.2 ? (gpsAccel + sensor) / 2 : gpsAccel
+  const sensor = sensorAccel()
+  const accel = sensor === null ? gpsAccel : (gpsAccel + sensor) / 2
   return accel * (sensitivity.value / 55)
 }
 
 /* Speed between fixes: extrapolate the last fix for half a second at most */
-const GPS_STALE_MS = 3000
+const GPS_HOLD_MS = 3000
+/* Tunnel / lost signal: the last speed fades with this time constant instead of parking the car */
+const GPS_FADE_S = 10
+/* Fixes less precise than this say nothing about speed */
+const GPS_MAX_ACCURACY_M = 50
 const currentSpeed = (now: number, dt: number) => {
-  /* No fix for a while: don't keep the car "moving" on an old reading */
-  if (gpsFixAt && now - gpsFixAt > GPS_STALE_MS) {
-    gpsSpeed = 0
-    gpsAccel = 0
+  /* GPS acceleration is a step per fix (~1 Hz): smooth it so one noisy fix isn't a throttle stab */
+  gpsAccel += (gpsAccelRaw - gpsAccel) * (1 - Math.exp(-dt / 0.5))
+  const age = gpsFixAt ? now - gpsFixAt : 0
+  let predicted: number
+  if (age > GPS_HOLD_MS) {
+    gpsAccelRaw = 0
+    predicted = gpsSpeed * Math.exp(-(age - GPS_HOLD_MS) / 1000 / GPS_FADE_S)
+    if (geolocationStatus.value === 'allowed') geolocationStatus.value = 'lost'
+  } else {
+    predicted = Math.max(0, gpsSpeed + gpsAccel * Math.min(age / 1000, 0.5))
   }
-  const since = gpsFixAt ? Math.min((now - gpsFixAt) / 1000, 0.5) : 0
-  const predicted = Math.max(0, gpsSpeed + gpsAccel * since)
   roadSpeed += (predicted - roadSpeed) * (1 - Math.exp(-dt / 0.15))
+  learnMotionAxis(dt)
   return roadSpeed
 }
 
-const startWatchingPosition = () => {
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId)
-    watchId = null
+/*
+ * Watch GPS straight away: a slow first fix (cold start, garage) just means
+ * "searching", the watch keeps going. Only a refused permission stops it.
+ */
+const requestGeolocation = () => {
+  stopGeolocation()
+  if (!('geolocation' in navigator)) {
+    geolocationStatus.value = 'denied'
+    return
   }
+  const session = sensorSession
+  geolocationStatus.value = 'searching'
 
   let lastPosition: GeolocationPosition | null = null
   let lastStamp = 0
 
   watchId = navigator.geolocation.watchPosition(
     (position) => {
+      if (session !== sensorSession) return
       const now = performance.now()
-      let kmh = gpsSpeed * 3.6
-      if (lastPosition && lastStamp) {
-        const distance = calculateDistance(
+      const accuracy = position.coords.accuracy || 0
+      if (accuracy > GPS_MAX_ACCURACY_M) return
+      geolocationStatus.value = 'allowed'
+
+      /* Fallback speed from positions, at least 500 ms apart; movement inside the error circle is jitter */
+      let derived: number | null = null
+      if (lastPosition && now - lastStamp >= 500) {
+        const meters = calculateDistance(
           lastPosition.coords.latitude,
           lastPosition.coords.longitude,
           position.coords.latitude,
           position.coords.longitude,
-        )
-        /* Fixes milliseconds apart turn a few meters of jitter into a huge speed */
-        const timeDiff = (now - lastStamp) / 3600000
-        if (now - lastStamp >= 500) kmh = distance / timeDiff
+        ) * 1000
+        const jitter = Math.max(accuracy, lastPosition.coords.accuracy || 0) * 0.3
+        derived = meters > jitter ? meters / ((now - lastStamp) / 1000) : 0
       }
-      // Prefer native speed when available (m/s -> km/h)
-      if (typeof position.coords.speed === 'number' && !Number.isNaN(position.coords.speed) && position.coords.speed >= 0) {
-        kmh = position.coords.speed * 3.6
+      if (!lastPosition || now - lastStamp >= 500) {
+        lastPosition = position
+        lastStamp = now
       }
 
-      /* Acceleration from successive fixes, smoothed: GPS speed is noisy at 1-10 Hz */
-      const next = kmh / 3.6
+      /* Prefer the receiver's own speed, unless it reads 0 while the car clearly moves */
+      const native = position.coords.speed
+      let next = gpsSpeed
+      if (typeof native === 'number' && Number.isFinite(native) && native >= 0 && !(native === 0 && derived !== null && derived > 3))
+        next = native
+      else if (derived !== null)
+        next = derived
+
       const fixDt = gpsFixAt ? (now - gpsFixAt) / 1000 : 0
-      if (fixDt > 0.05 && fixDt < 3) {
-        const raw = Math.max(-12, Math.min(12, (next - gpsSpeed) / fixDt))
-        gpsAccel += (raw - gpsAccel) * Math.min(1, fixDt / 0.35)
-      } else {
-        gpsAccel = 0
-      }
+      gpsAccelRaw = fixDt > 0.05 && fixDt < GPS_HOLD_MS / 1000
+        ? Math.max(-12, Math.min(12, (next - gpsSpeed) / fixDt))
+        : 0
       gpsSpeed = next
       gpsFixAt = now
-
-      lastPosition = position
-      lastStamp = now
     },
     (error) => {
-      console.error('Geolocation watching error:', error)
-      geolocationStatus.value = 'denied'
+      if (session !== sensorSession) return
+      console.warn('Geolocation error:', error)
+      if (error.code === error.PERMISSION_DENIED) {
+        geolocationStatus.value = 'denied'
+        stopGeolocation()
+      } else if (geolocationStatus.value !== 'allowed') {
+        geolocationStatus.value = 'searching'
+      }
     },
     { enableHighAccuracy: true, maximumAge: 0 },
   )
@@ -332,7 +462,12 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
+/* Tesla's browser has no motion sensor: say so instead of "Requesting…" forever */
+const MOTION_WAIT_MS = 3000
+let motionWaitTimer: ReturnType<typeof setTimeout> | null = null
+
 const requestAccelerometer = async () => {
+  const session = sensorSession
   if (!('DeviceMotionEvent' in window)) {
     accelerometerStatus.value = 'denied'
     return
@@ -344,6 +479,7 @@ const requestAccelerometer = async () => {
       | (() => Promise<string>)
     if (typeof requestPermission === 'function') {
       const state = await requestPermission()
+      if (session !== sensorSession) return
       if (state !== 'granted') {
         accelerometerStatus.value = 'denied'
         return
@@ -351,31 +487,16 @@ const requestAccelerometer = async () => {
     }
     window.removeEventListener('devicemotion', handleMotion)
     window.addEventListener('devicemotion', handleMotion)
-    accelerometerStatus.value = 'allowed'
+    /* 'allowed' once a reading actually arrives */
+    motionWaitTimer = setTimeout(() => {
+      motionWaitTimer = null
+      if (session === sensorSession && accelerometerStatus.value === 'pending') accelerometerStatus.value = 'none'
+    }, MOTION_WAIT_MS)
   } catch (error) {
+    if (session !== sensorSession) return
     console.error('Accelerometer error:', error)
     accelerometerStatus.value = 'denied'
   }
-}
-
-const requestGeolocation = () => {
-  if (!('geolocation' in navigator)) {
-    geolocationStatus.value = 'denied'
-    return
-  }
-  geolocationStatus.value = 'pending'
-  navigator.geolocation.getCurrentPosition(
-    () => {
-      geolocationStatus.value = 'allowed'
-      startWatchingPosition()
-    },
-    (error) => {
-      console.error('Geolocation error:', error)
-      geolocationStatus.value = 'denied'
-      stopGeolocation()
-    },
-    { enableHighAccuracy: true, timeout: 10000 },
-  )
 }
 
 const startSensors = () => {
@@ -476,28 +597,39 @@ const startUpdateLoop = () => {
   animationId = requestAnimationFrame(update)
 }
 
-const initVehicle = async () => {
+/* Build the selected car; null if a newer boot / switch / teardown happened meanwhile */
+const createVehicle = async (session: number) => {
+  const next = new Vehicle()
   try {
-    disposeVehicle()
-    const next = new Vehicle()
-    const config = configurations[selectedConfig.value] as EngineConfiguration
-    await next.init(config)
-    vehicle.value = next
-    maxRpm.value = config.engine.limiter || 8000
-    minRpm.value = config.engine.idle || 1000
-    rpm.value = next.engine.rpm
-    updateVolume()
-    next.audio.setSubwoofer(subwoofer.value)
-    syncAutoShift()
+    await next.init(configurations[selectedConfig.value] as EngineConfiguration)
   } catch (error) {
-    console.error('Failed to initialize vehicle:', error)
-    disposeVehicle()
+    next.dispose()
     throw error
   }
+  if (session !== bootId) {
+    next.dispose()
+    return null
+  }
+  return next
+}
+
+const installVehicle = (next: Vehicle) => {
+  disposeVehicle()
+  const config = activeConfig.value
+  vehicle.value = next
+  maxRpm.value = config.engine.limiter || 8000
+  minRpm.value = config.engine.idle || 1000
+  rpm.value = next.engine.rpm
+  updateVolume()
+  next.audio.setSubwoofer(subwoofer.value)
+  syncAutoShift()
 }
 
 const teardownEngine = () => {
+  bootId++
+  sensorSession++
   engineReady.value = false
+  audioBlocked.value = false
   if (animationId) {
     cancelAnimationFrame(animationId)
     animationId = null
@@ -506,6 +638,7 @@ const teardownEngine = () => {
   revHeld = false
   blipUntil = 0
   gpsSpeed = 0
+  gpsAccelRaw = 0
   gpsAccel = 0
   gpsFixAt = 0
   roadSpeed = 0
@@ -518,65 +651,83 @@ const teardownEngine = () => {
   disposeVehicle()
 }
 
-const resumeAudioIfNeeded = async () => {
-  const ctx = vehicle.value?.audio.ctx
-  if (ctx && ctx.state === 'suspended') {
-    try {
-      await ctx.resume()
-    } catch (error) {
-      console.warn('Audio resume failed', error)
-    }
-  }
-}
-
-const bootEngine = async (startAfterBoot = false) => {
+const bootEngine = async () => {
+  teardownEngine()
+  const session = bootId
+  errorMessage.value = ''
   try {
-    errorMessage.value = ''
-    await initVehicle()
-    if (!vehicle.value) {
-      errorMessage.value = 'Failed to start engine.'
-      return
-    }
-
-    void resumeAudioIfNeeded()
-    updateVolume()
+    const next = await createVehicle(session)
+    if (!next) return
+    installVehicle(next)
+    /* Nothing plays until the engine is started: don't hold the car's audio meanwhile */
+    releaseAudio()
     autoShiftEnabled.value = true
     syncAutoShift()
     startSensors()
     bindMediaKeys()
     engineReady.value = true
     startUpdateLoop()
-    if (startAfterBoot) startEngine()
-
-    // Browsers may keep AudioContext suspended until a gesture — unlock on first tap
-    const unlock = () => {
-      void resumeAudioIfNeeded()
-      window.removeEventListener('pointerdown', unlock)
-    }
-    window.addEventListener('pointerdown', unlock, { once: true })
   } catch (error) {
+    if (session !== bootId) return
     console.error(error)
     errorMessage.value = error instanceof Error ? error.message : 'Failed to start engine'
     teardownEngine()
   }
 }
 
-const handleConfigChange = async (e: Event) => {
+/* Another sound: sensors, keys and the loop keep running, a running engine crossfades and stays on */
+const SWITCH_FADE_S = 0.25
+const switchEngine = async () => {
+  const session = ++bootId
+  try {
+    const next = await createVehicle(session)
+    if (!next) return
+    const old = vehicle.value
+    const wasOn = engineOn.value
+    vehicle.value = null
+    installVehicle(next)
+    if (old) {
+      old.audio.setMasterVolume(0, SWITCH_FADE_S)
+      setTimeout(() => old.dispose(), SWITCH_FADE_S * 1000 + 50)
+    }
+    if (wasOn) {
+      next.start(performance.now(), true)
+      next.audio.setMasterVolume(0)
+      next.audio.setMasterVolume(volume.value / 100, SWITCH_FADE_S)
+      void unlockAudio()
+    } else {
+      releaseAudio()
+    }
+  } catch (error) {
+    if (session !== bootId) return
+    console.error(error)
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to load engine'
+  }
+}
+
+const handleConfigChange = (e: Event) => {
   selectedConfig.value = (e.target as HTMLSelectElement).value as keyof typeof configurations
-  const wasOn = engineOn.value
-  teardownEngine()
-  await bootEngine(wasOn)
+  /* Still loading the first one: start over with the new choice */
+  if (!engineReady.value) void bootEngine()
+  else void switchEngine()
 }
 
 onMounted(() => {
+  window.addEventListener('pointerdown', handlePagePointer)
   void bootEngine()
 })
 
 onUnmounted(() => {
+  window.removeEventListener('pointerdown', handlePagePointer)
+  if (shiftRefusedTimer) clearTimeout(shiftRefusedTimer)
   teardownEngine()
 })
 
 watch(shiftMode, () => syncAutoShift())
+/* The rev button is swapped out when the car moves off: its pointerup never comes */
+watch(driving, () => {
+  revHeld = false
+})
 </script>
 
 <template>
@@ -621,7 +772,7 @@ watch(shiftMode, () => syncAutoShift())
             >{{ tick.v / 1000 }}</text>
           </g>
 
-          <text class="tach-gear" x="200" y="172" text-anchor="middle" dominant-baseline="central">{{ gearDisplay }}</text>
+          <text class="tach-gear" :class="{ refused: shiftRefused }" x="200" y="172" text-anchor="middle" dominant-baseline="central">{{ gearDisplay }}</text>
           <text class="tach-caption" x="200" y="246" text-anchor="middle">Gear</text>
           <rect class="load-track" x="140" y="260" width="120" height="6" rx="3" />
           <rect class="load-fill" x="140" y="260" :width="120 * throttle" height="6" rx="3" />
@@ -676,10 +827,12 @@ watch(shiftMode, () => syncAutoShift())
 
         <div class="sensors">
           <span :class="geolocationStatus">GPS · {{ permissionLabel(geolocationStatus) }}</span>
+          <button v-if="geolocationStatus === 'denied' && engineReady" class="retry" @click="requestGeolocation">Retry GPS</button>
           <span :class="accelerometerStatus">Motion · {{ permissionLabel(accelerometerStatus) }}</span>
         </div>
 
         <p v-if="errorMessage" class="hint error-text">{{ errorMessage }}</p>
+        <p v-else-if="audioBlocked" class="hint error-text">The browser is holding the sound back. Tap anywhere on the page to hear the engine.</p>
         <p v-else class="hint">
           <template v-if="driving">RPM follows your speed through the gearbox, load follows acceleration. Steering wheel next/prev shifts.</template>
           <template v-else-if="engineOn">Stopped: steering wheel next/prev blips the throttle. Drive off and the engine follows the car.</template>
@@ -878,6 +1031,10 @@ watch(shiftMode, () => syncAutoShift())
   font-weight: 500;
 }
 
+.tach-gear.refused {
+  fill: var(--red);
+}
+
 .tach-gear {
   fill: var(--fg);
   font-size: 118px;
@@ -1015,10 +1172,7 @@ watch(shiftMode, () => syncAutoShift())
   color: var(--muted);
 }
 
-.sensors .allowed::before,
-.sensors .denied::before,
-.sensors .pending::before,
-.sensors .off::before {
+.sensors > span::before {
   content: '';
   display: inline-block;
   width: 0.45rem;
@@ -1036,8 +1190,20 @@ watch(shiftMode, () => syncAutoShift())
   background: var(--red);
 }
 
-.sensors .pending::before {
+.sensors .pending::before,
+.sensors .searching::before,
+.sensors .lost::before {
   background: var(--accent);
+}
+
+.sensors .retry {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0.1rem 0.6rem;
+  cursor: pointer;
 }
 
 .hint {
